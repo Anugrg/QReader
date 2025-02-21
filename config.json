@@ -1,8 +1,18 @@
 {
 
     "use_serial": true,
-    "COM": "COM8",
-    "Baud": 9600,
-    "timeout": 1
 
+    "settings": [
+        
+            {
+                "COM": "COM8",
+                "Baud": 9600,
+                "timeout": 1
+            },
+            {
+                "COM": "COM9",
+                "Baud": 9600,
+                "timeout": 1
+            }
+        ]
 }
