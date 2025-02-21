@@ -1,5 +1,5 @@
 dist\
 *.spec
-DISC\
-MA\
+DISC/
+MA/
 app.log
