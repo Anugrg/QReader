@@ -1,0 +1,8 @@
+{
+
+    "use_serial": true,
+    "COM": "COM8",
+    "Baud": 9600,
+    "timeout": 1
+
+}
