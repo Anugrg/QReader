@@ -4,3 +4,7 @@ build/
 DISC/
 MA/
 app.log
+requirements.txt
+[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
+*.xlsx
+*.zip

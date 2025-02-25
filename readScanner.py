@@ -4,6 +4,7 @@ from datetime import datetime as dt
 from tabulate import tabulate
 import pandas as pd
 import json
+import socket
 
 import serial
 import time
@@ -18,7 +19,6 @@ def show_only_info(record):
 # create logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 
@@ -41,21 +41,63 @@ logger.addHandler(file_handler)
 
 class ScanReaderThread(Thread):
 
-    def __init__(self, config : json):
+    def __init__(self, config : json, tcp_host, tcp_port):
         Thread.__init__(self)
         logger.debug('Starting thread ok')
         self.config = config
         logging.info('Listening at ' + self.config.get('COM'))
         self.ser = serial.Serial(self.config.get('COM'), self.config.get('Baud'), timeout=self.config.get('timeout'))
-        
+        self.host = tcp_host
+        self.port = tcp_port
+
     def run(self):
         while True:
             if self.ser.in_waiting > 0:
                 data = self.ser.readline().decode('utf-8').rstrip()
-                process_data(data)
+                process_data(data, self.host, self.port)
 
 
-def save_to_file(prefix, input_val):
+class TCPClient:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+    
+    def send(self, data : int):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.connect((self.host, self.port))
+            s.sendall(data.to_bytes(2, 'big'))
+            data = s.recv(4096)
+            return data
+
+
+def create_dir(dest_folders):
+    
+    try:
+        os.makedirs(dest_folders, exist_ok=True)
+    except Exception as e:
+        logging.error("Error while creating directory", exc_info=True)
+
+
+def create_excel(data, data_header, dest_folders, filename):
+    target_file = os.path.join(dest_folders, filename)
+    exists = True  # does a file on same day exist to use
+    try:
+        df = pd.read_excel(target_file, index_col=False)
+    except:
+        exists = False
+
+    if not exists:
+        df = pd.DataFrame(data, columns=data_header)
+    else:
+        logger.info('adding row')
+        logger.info(data)
+        df.loc[len(df)] = data[0]
+
+    df.to_excel(target_file, index=False)
+
+
+def save_to_file(prefix, input_val, host, port):
+    tcp = TCPClient(host, port)
     scan = re.findall(r"MA.*", input_val)[0]
     data_header = ['Ref No.', 'Model', 'Packing code', 'Order no.', 'Qty']
     data = []
@@ -84,111 +126,52 @@ def save_to_file(prefix, input_val):
     # quantity
     qty = re.search(r"(?<=0000)\d{3}[A-Z]", scan).group()
     data_row.append(qty)
+    tcp.send(qty)
 
     data.append(data_row)
-
     print(tabulate(data, headers=data_header, tablefmt="grid", showindex="always"))
- 
-    exists = True  # does a file on same day exist to use
 
     _date = dt.today().strftime('%Y_%m_%d')
-    dest_folders = os.path.join(os.getcwd(), prefix, _date, model_no)
-
-    try:
-        os.makedirs(dest_folders, exist_ok=True)
-    except Exception as e:
-        logging.error("Error while creating directory", exc_info=True)
-
-    target_file = os.path.join(dest_folders, 'MRE_QR_kanban_info.csv') 
-    try:
-        df = pd.read_csv(target_file, index_col=False)
-    except:
-        exists = False
-
-    if not exists:
-        df = pd.DataFrame(data, columns=data_header)
-    else:
-        print('adding row')
-        print(data)
-        df.loc[len(df)] = data[0]
-
-    df.to_csv(target_file, index=False)
+    dest_folders = os.path.join(os.getcwd(), _date)
+    create_dir(dest_folders)
+    create_excel(data, data_header, dest_folders, 'MRE_QR_kanban_info.xlsx')
 
 
-def save_to_disk(prefix, data):
-
+def save_to_disk(prefix, lot_number):
+    data = []
+    data_header = ['Lot no.']
+    data.append(lot_number)
     _date = dt.today().strftime('%Y_%m_%d')
-    dest_folders = os.path.join(os.getcwd(), prefix, _date)
-    try:
-        os.makedirs(dest_folders, exist_ok=True)
-    except Exception as e:
-        logging.error("Error while creating directory", exc_info=True)
-    
-    filename = os.path.join(dest_folders, 'lot_numbers.txt')
-
-    with open(f'{filename}', 'a+') as f:
-        f.write(f'{data}\n' )
-
-def serial_input(ser):
-    
-    if ser.in_waiting > 0:
-        data = ser.readline().decode('utf-8').rstrip()
-        process_data(data)
+    dest_folders = os.path.join(os.getcwd(), _date)
+    create_dir(dest_folders)
+    create_excel(data, data_header, dest_folders, 'lot_numbers.xlsx')
 
 
-def use_input():
-    data = input("Ready for barcode scanner... ")
-    process_data(data)
-
-
-def process_data(data):
+def process_data(data : str, host, port):
     if data.startswith('DISC'):
-        save_to_file('DISC', data)
+        save_to_file('DISC', data, host, port)
     elif data.startswith('MA'):
         save_to_disk('MA', data)
-    
 
-def process_with_threads(conf):
+
+def process_with_threads(conf : json):
     com_info = conf.get('settings')
-    
     try:
         for i in range(len(com_info)):
-            
-            print(com_info[i])
-            t = ScanReaderThread(com_info[i])
-            
+            logger.info(com_info[i])
+            t = ScanReaderThread(com_info[i], com_info['PLC_TCP_IP'], com_info['PLC_TCP_PORT'])
             t.daemon = True
-
             t.start()
 
     except Exception as e:
-        logger.error("Thread creation failed", exc_info=True)
+        logger.error("Scanner thread creation failed", exc_info=True)
 
     while True:
         try:
-            logger.info("Waiting for input...")
-            time.sleep(20)
+            logger.debug("Health check OK")
+            time.sleep(60)
         except KeyboardInterrupt as e:
             print("shutting down ...")
-            break
-
-
-# test
-def process_scanned_data(config):
-    print('starting barcode scanner reader...')
-    is_serial = config.get('use_serial')
-    if is_serial:
-        ser = serial.Serial(config.get('COM'), config.get('Baud'), timeout=config.get('timeout'))
-    while True:
-        try:
-            if is_serial:
-                serial_input(ser)
-            else:
-                use_input()
-        except KeyboardInterrupt:
-            print("shutting down...")
-            if ser.is_open:
-                ser.close()
             break
 
 
