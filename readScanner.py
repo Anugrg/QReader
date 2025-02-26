@@ -190,7 +190,7 @@ def process_data(data : str, queue):
 
 def process_with_threads(conf : json):
     com_info = conf.get('settings')
-    
+
     queue = Queue()
     try:
         for i in range(len(com_info)):
@@ -200,7 +200,7 @@ def process_with_threads(conf : json):
             t.start()
     except Exception as e:
         logger.error("Scanner thread creation failed", exc_info=True)
-    
+
     tcp = TCPClient(conf.get('PLC_TCP_IP'), conf.get('PLC_TCP_PORT'))
     try:
         t = PLCSenderThread(queue, tcp)
