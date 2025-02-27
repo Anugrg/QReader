@@ -10,9 +10,9 @@ from datetime import datetime as dt
 from PySide6.QtWidgets import (QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QDateEdit)
 from PySide6.QtCore import  QObject, Signal, Slot, QByteArray
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QPixmap
 
-import readScanner2 as scanner
+import readScanner as scanner
 
 
 # create logger
