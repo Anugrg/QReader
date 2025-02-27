@@ -7,15 +7,11 @@ import pandas as pd
 import json
 import socket
 from queue import Queue
-import multiprocessing
 
-from PySide6.QtWidgets import QApplication
 import serial
 import time
 from threading import Thread
 import logging
-
-from table_gui import TableApp
 
 
 def show_only_info(record):
@@ -47,19 +43,20 @@ logger.addHandler(file_handler)
 
 class ScanReaderThread(Thread):
 
-    def __init__(self, config : json, queue):
+    def __init__(self, config : json, queue, _pipe):
         Thread.__init__(self)
         logger.debug('Starting thread ok')
         self.config = config
         logging.info('Listening at ' + self.config.get('COM'))
         self.ser = serial.Serial(self.config.get('COM'), self.config.get('Baud'), timeout=self.config.get('timeout'))
         self.queue = queue
+        self._pipe = _pipe
 
     def run(self):
         while True:
             if self.ser.in_waiting > 0:
                 data = self.ser.readline().decode('utf-8').rstrip()  # barcode
-                process_data(data, self.queue)
+                process_data(data, self.queue, self._pipe)
 
 
 class PLCSenderThread(Thread):
@@ -103,6 +100,7 @@ class TCPClient:
                 time.sleep(5)
                 retry = -1
 
+
 def create_dir(dest_folders):
     
     try:
@@ -129,7 +127,7 @@ def create_excel(data, data_header, dest_folders, filename):
     df.to_excel(target_file, index=False)
 
 
-def save_to_file(prefix, input_val, queue):
+def save_to_file(prefix, input_val, queue, _pipe):
 
     scan = re.findall(r"MA.*", input_val)[0]
     data_header = ['Model', 'Packing code', 'Quantity']
@@ -168,6 +166,8 @@ def save_to_file(prefix, input_val, queue):
     queue.join()
 
     data.append(data_row)
+    logger.info("Sending data to table")
+    _pipe.send(data_row)
     print(tabulate(data, headers=data_header, tablefmt="grid", showindex="always"))
 
     _date = dt.today().strftime('%Y_%m_%d')
@@ -176,31 +176,32 @@ def save_to_file(prefix, input_val, queue):
     create_excel(data, data_header, dest_folders, 'MRE_QR_kanban_info.xlsx')
     
 
-def save_to_disk(prefix, lot_number):
+def save_to_disk(prefix, lot_number, _pipe):
     data = []
     data_header = ['Lot no.']
     data.append(lot_number)
+    _pipe.send(data)
+
     _date = dt.today().strftime('%Y_%m_%d')
     dest_folders = os.path.join(os.getcwd(), _date)
     create_dir(dest_folders)
     create_excel(data, data_header, dest_folders, 'lot_numbers.xlsx')
 
 
-def process_data(data : str, queue):
+def process_data(data : str, queue, _pipe):
     if data.startswith('DISC'):
-        save_to_file('DISC', data, queue)
+        save_to_file('DISC', data, queue, _pipe)
     elif data.startswith('MA'):
-        save_to_disk('MA', data)
+        save_to_disk('MA', data, _pipe)
 
 
-def process_with_threads(conf : json):
+def process_with_threads(conf : json, _pipe):
     com_info = conf.get('settings')
-
     queue = Queue()
     try:
         for i in range(len(com_info)):
             logger.info(com_info[i])
-            t = ScanReaderThread(com_info[i], queue)
+            t = ScanReaderThread(com_info[i], queue, _pipe)
             t.daemon = True
             t.start()
     except Exception as e:
@@ -213,32 +214,20 @@ def process_with_threads(conf : json):
         t.start()
     except Exception as e:
         logger.error("PLC sender thread creation failed", exc_info=True)
-
+    
     while True:
         try:
             logger.debug("Health check OK")
+            
             time.sleep(60)
         except KeyboardInterrupt as e:
             print("shutting down ...")
             break
 
 
-def start_gui():
-    app = QApplication(sys.argv)
-    ex = TableApp()
-    ex.show()
-    sys.exit(app.exec())
-    # Create a multiprocessing queue
+def start(_pipe):
 
-
-
-if __name__=='__main__':
     with open('config.json', 'r') as f:
         config = json.load(f)
 
-    process_with_threads(config)
-
-    table_process = multiprocessing.Process(target=start_gui, args=())
-
-    table_process.terminate()
-    table_process.join()
+    process_with_threads(config, _pipe) # this pipe is for gui

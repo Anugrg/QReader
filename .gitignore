@@ -8,3 +8,4 @@ requirements.txt
 [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/
 *.xlsx
 *.zip
+__pycache__/
