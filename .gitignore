@@ -9,3 +9,4 @@ requirements.txt
 *.xlsx
 *.zip
 __pycache__/
+*.log
