@@ -53,7 +53,6 @@ class TableApp(QWidget):
     def initUI(self):
         self.setWindowTitle('Barcode Scanner Reader Display')
         self.setGeometry(100, 100, 2200, 1000)
-
         layout = QVBoxLayout()
 
         # Input layout
