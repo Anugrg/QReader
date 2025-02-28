@@ -168,6 +168,7 @@ def save_to_file(prefix, input_val, queue, _pipe):
     data.append(data_row)
     logger.info("Sending data to table")
     _pipe.send(data_row)
+
     print(tabulate(data, headers=data_header, tablefmt="grid", showindex="always"))
 
     _date = dt.today().strftime('%Y_%m_%d')
@@ -214,11 +215,10 @@ def process_with_threads(conf : json, _pipe):
         t.start()
     except Exception as e:
         logger.error("PLC sender thread creation failed", exc_info=True)
-    
+
     while True:
         try:
             logger.debug("Health check OK")
-            
             time.sleep(60)
         except KeyboardInterrupt as e:
             print("shutting down ...")
