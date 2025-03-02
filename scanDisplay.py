@@ -11,8 +11,9 @@ import socket
 
 from PySide6.QtWidgets import (QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QDateEdit)
-from PySide6.QtCore import  QObject, Signal, Slot, QByteArray, QRunnable, QThreadPool
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import  QObject, Signal, Slot, QByteArray, QRunnable, QThreadPool, QTimer, Qt
+from PySide6.QtGui import QPixmap, QColor, QBrush
+
 
 import readScanner as scanner
 
@@ -33,46 +34,72 @@ logger.addHandler(file_handler)
 
 
 class TcpSignals(QObject):
-    result = Signal(int)
+    result = Signal(tuple)
+    fail = Signal(tuple)
+    conn = Signal(int)
 
 
 class Communicator(QObject):
     data_received = Signal(list)
 
 
-class Worker(QRunnable):
+class TCPWorker(QRunnable):
     '''
     Worker thread
     '''
 
-    def __init__(self, qty):
+    def __init__(self, qty : int, host, port, row):
+        super().__init__()
         self.data = qty
+        self.host = host
+        self.port = port
+        self.signal = TcpSignals()
+        self.recv_bytes = 4096
+        self.row = row
 
     @Slot()  # QtCore.Slot
     def run(self):
 
         logger.info(f'Sending to PLC --- {dt.now()}')
-        retry  = 3
+        success = True
+        retry  = 1
         while retry > 0:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.connect((self.host, self.port))
                     logger.info(f'Sending  {self.data} to plc')
+
                     s.sendall(self.data.to_bytes(2, 'big'))
                     resp = s.recv(self.recv_bytes)
                     logger.info(f'Reply from TCP server: {resp}')
-                    retry=0
+                    success = True
+                    retry = 0
             except ConnectionRefusedError:
-                logger.error("TCP connection refused",exc_info=True)
-                time.sleep(5)
+                logger.error("TCP connection refused", exc_info=True)
+                self.signal.conn.emit(0)
+                time.sleep(1)
+                success = False
                 retry -= 1
             except AttributeError:
                 logger.error(f'Data is not int : {self.data}', exc_info=True)
-                time.sleep(5)
+                time.sleep(1)
                 retry = -1
+                success = False
+
+        # emit signal to change PLC success status
+        # if it got here then resp is received
+        # so emit signal for PLC tcp status as well again
+        if success:
+            self.signal.conn.emit(1)
+            result = int.from_bytes(resp, 'big')
+            if result:
+                self.signal.result.emit((result, self.row))
+            else:
+                self.signal.fail.emit((result, self.row))
 
 
 class TableApp(QWidget):
+
     def __init__(self, pipe):
         super().__init__()
         logger.info("Table rendered...")
@@ -80,17 +107,42 @@ class TableApp(QWidget):
         self.pipe = pipe
         self.initUI()
         logger.info("Setting up Signal...")
+        
+
+        # thread to fetch data from pipe
         self.communicator = Communicator()
         self.communicator.data_received.connect(self.add_row)
         self.t = Thread(target=self.read_from_pipe)
         self.t.daemon = True
         self.t.start()
-        logger.info("Thread Started...")
+
+        self.threadpool = QThreadPool()
+
 
     def initUI(self):
         self.setWindowTitle('Barcode Scanner Reader Display')
-        self.setGeometry(100, 100, 2200, 1000)
+        self.setGeometry(100, 100, 2200, 800)
         layout = QVBoxLayout()
+        plc_layout = QHBoxLayout()
+
+        self.plc_tcp_status = QLabel("PLC:")
+        self.plc_tcp_status.setFixedWidth(50)
+
+        self.plc_tcp_status_text = QLineEdit("Waiting")
+        self.plc_tcp_status_text.setReadOnly(True)
+        self.plc_tcp_status_text.setFixedWidth(80)
+
+        self.chk_conn_button = QPushButton('Check', self)
+        self.chk_conn_button.clicked.connect(self.check_tcp_status)
+
+        plc_layout.addWidget(self.plc_tcp_status)
+        plc_layout.addWidget(self.plc_tcp_status_text)
+        plc_layout.addWidget(self.chk_conn_button)
+        plc_layout.setSpacing(0)
+        plc_layout.setContentsMargins(5, 5, 5, 5)
+        plc_layout.setAlignment(self.plc_tcp_status, Qt.AlignLeft)
+        plc_layout.setAlignment(self.plc_tcp_status_text, Qt.AlignLeft)
+        plc_layout.addStretch()
 
         # Input layout
         input_layout = QHBoxLayout()
@@ -101,26 +153,53 @@ class TableApp(QWidget):
         self.name_field.setMinimumWidth(350)
         self.label = QLabel("Lot no.")
         self.name_field.setPlaceholderText('Lot no.')
+
         input_layout.addWidget(self.date_field)
         input_layout.addWidget(self.label)
         input_layout.addWidget(self.name_field)
+        self.start_button = QPushButton('Start', self)
+        self.start_button.clicked.connect(self.send_tcp)
+        input_layout.addWidget(self.start_button)
 
+        self.success_color = QColor(200, 255, 200)
+        self.fail_color = QColor(255, 200, 200)
 
         # Table
         self.table = QTableWidget(self)
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(['Model', 'Packing Code', 'Quantity'])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(['Model', 'Packing Code', 'Quantity', 'PLC'])
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
+
         # Clear button
         self.clear_button = QPushButton('Clear', self)
         self.clear_button.clicked.connect(self.clear_table)
-
+ 
+        layout.addLayout(plc_layout)
         layout.addLayout(input_layout)
         layout.addWidget(self.table)
         layout.addWidget(self.clear_button)
-
+        self.check_tcp_status()
         self.setLayout(layout)
+
+    def check_tcp_status(self):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect(('127.0.0.1', 65432))
+                logger.info(s.getpeername())
+                self.plc_tcp_status_text.setText('CONNECTED')
+
+        except ConnectionRefusedError:
+            self.plc_tcp_status_text.setText('FAILED')
+            logger.error("TCP connection refused", exc_info=True)
+
+
+    def toggle_tcp_conn(self, status):
+
+        if status:
+            self.plc_tcp_status_text.setText('CONNECTED')
+        else:
+            self.plc_tcp_status_text.setText('FAILED')
 
 
     def read_from_pipe(self):
@@ -131,7 +210,31 @@ class TableApp(QWidget):
                 self.communicator.data_received.emit(data)
 
 
-    @Slot(list)    
+    def send_tcp(self):
+        for row in range(self.table.rowCount()):
+            if self.table.item(row, 3).text() == 'SUCCESS':
+                continue
+
+            qty = self.table.item(row, 2).text()
+            worker = TCPWorker(int(qty), '127.0.0.1', 65432, row)
+            worker.signal.result.connect(self.get_plc_status)
+            worker.signal.fail.connect(self.get_plc_status)
+            worker.signal.conn.connect(self.toggle_tcp_conn)
+            self.threadpool.start(worker)
+
+    def get_plc_status(self, result):
+        status, row = result
+        logger.info(f"Sent to plc success: {status}")
+        if status:
+            self.table.setItem(row, 3, QTableWidgetItem('SUCCESS'))
+            self.table.item(row, 3).setBackground(QBrush(self.success_color))
+        else:
+            self.table.setItem(row, 3, QTableWidgetItem('FAIL'))
+            self.table.item(row, 3).setBackground(QBrush(self.fail_color))
+
+
+
+    @Slot(list)
     def add_row(self, data):
         logger.info(f"Data received: {data}")
         if data and len(data) == 3:
@@ -141,10 +244,13 @@ class TableApp(QWidget):
             self.table.setItem(row_position, 0, QTableWidgetItem(model))
             self.table.setItem(row_position, 1, QTableWidgetItem(packing_code))
             self.table.setItem(row_position, 2, QTableWidgetItem(quantity))
+            self.table.setItem(row_position, 3, QTableWidgetItem('Idle'))
+            # self.send_tcp(int(data[-1])) 
 
         else:
             self.name_field.clear()
             self.name_field.setText(data[0])
+
 
     def clear_table(self):
         self.table.setRowCount(0)
@@ -154,7 +260,7 @@ class MainWindow(QMainWindow):
     def __init__(self, pipe):
         super().__init__()
         logger.info("Main window created...")
-        
+        self.setFixedHeight(650)
         self.table = TableApp(pipe)
         self.setCentralWidget(self.table)
 

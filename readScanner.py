@@ -1,5 +1,6 @@
 import os
 import sys
+import io
 import re
 from datetime import datetime as dt
 from tabulate import tabulate
@@ -7,6 +8,7 @@ import pandas as pd
 import json
 import socket
 from queue import Queue
+from unittest.mock import patch
 
 import serial
 import time
@@ -40,6 +42,22 @@ console_handler.addFilter(show_only_info)
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
+DEBUG = True
+
+class MockScanReaderThread(Thread):
+
+    def __init__(self, queue, _pipe):
+        Thread.__init__(self)
+        logger.debug('Starting thread for Mock serial ok')
+        self.queue = queue
+        self._pipe = _pipe
+        self.mock_data = 'DISC50600200000100910002101251041511207123051520715308154081550921MA949979-41904T          MA949979-41908G0000060N100 00315942025010600000000010160016'
+
+    def run(self):
+        while True:
+            process_data(self.mock_data, self.queue, self._pipe)
+            time.sleep(60)
+
 
 class ScanReaderThread(Thread):
 
@@ -56,6 +74,7 @@ class ScanReaderThread(Thread):
         while True:
             if self.ser.in_waiting > 0:
                 data = self.ser.readline().decode('utf-8').rstrip()  # barcode
+                print(data)
                 process_data(data, self.queue, self._pipe)
 
 
@@ -65,7 +84,7 @@ class PLCSenderThread(Thread):
         Thread.__init__(self)
         self.queue = queue
         self.tcp = tcp
-    
+
     def run(self):
         while True:
             data = self.queue.get()
@@ -161,9 +180,9 @@ def save_to_file(prefix, input_val, queue, _pipe):
     data_row.append(qty[:-1])
 
     # send this info to PLC
-    queue.put(int(qty[:-1]))
+    # queue.put(int(qty[:-1]))
     logger.info("Waiting for PLC transmission...")
-    queue.join()
+    # queue.join()
 
     data.append(data_row)
     logger.info("Sending data to table")
@@ -198,23 +217,28 @@ def process_data(data : str, queue, _pipe):
 
 def process_with_threads(conf : json, _pipe):
     com_info = conf.get('settings')
+    debug = True
     queue = Queue()
+    threads = []
     try:
         for i in range(len(com_info)):
             logger.info(com_info[i])
-            t = ScanReaderThread(com_info[i], queue, _pipe)
+            if DEBUG:
+                t = MockScanReaderThread(queue, _pipe)
+            else:    
+                t = ScanReaderThread(com_info[i], queue, _pipe)
             t.daemon = True
             t.start()
     except Exception as e:
         logger.error("Scanner thread creation failed", exc_info=True)
-
-    tcp = TCPClient(conf.get('PLC_TCP_IP'), conf.get('PLC_TCP_PORT'))
-    try:
-        t = PLCSenderThread(queue, tcp)
-        t.daemon = True
-        t.start()
-    except Exception as e:
-        logger.error("PLC sender thread creation failed", exc_info=True)
+    print(threads)
+    # tcp = TCPClient(conf.get('PLC_TCP_IP'), conf.get('PLC_TCP_PORT'))
+    # try:
+    #     t = PLCSenderThread(queue, tcp)
+    #     t.daemon = True
+    #     t.start()
+    # except Exception as e:
+    #     logger.error("PLC sender thread creation failed", exc_info=True)
 
     while True:
         try:
