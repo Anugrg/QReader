@@ -369,7 +369,7 @@ class TableApp(QWidget):
                     self.worker.signal.fail.connect(self.get_plc_status)
                     self.worker.signal.conn.connect(self.toggle_tcp_conn)
                     self.threadpool.start(self.worker)
-                    self.set_col_text(0, 6, 'RUNNING')
+                    self.set_col_text(0, 7, 'RUNNING')
                     self.color_row(0, QColor(235, 169, 158))
                 elif not self.worker.running:
                     self.worker.running = True
