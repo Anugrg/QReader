@@ -371,6 +371,8 @@ class TableApp(QWidget):
                     self.threadpool.start(self.worker)
                     self.set_col_text(0, 6, 'RUNNING')
                     self.color_row(0, QColor(235, 169, 158))
+                elif not self.worker.running:
+                    self.worker.running = True
 
 
     def reset_style(self, widget, text):
@@ -502,7 +504,7 @@ class TableApp(QWidget):
             item = self.table.item(row, column)
             if item and item.text() == order:
                 return True
-    
+
         return False
 
 
@@ -540,9 +542,9 @@ class TableApp(QWidget):
                     self.table.setItem(row_position, 1, QTableWidgetItem(model))
                     self.table.setItem(row_position, 2, QTableWidgetItem(packing_code))
                     self.table.setItem(row_position, 3, QTableWidgetItem(quantity))  # req quantity
-                    self.table.setItem(row_position, 4, QTableWidgetItem('IDLE'))  # good
-                    self.table.setItem(row_position, 5, QTableWidgetItem('IDLE'))  # defect 
-                    self.table.setItem(row_position, 6, QTableWidgetItem('IDLE'))  # completed   
+                    self.table.setItem(row_position, 4, QTableWidgetItem('0'))  # good
+                    self.table.setItem(row_position, 5, QTableWidgetItem('0'))  # defect 
+                    self.table.setItem(row_position, 6, QTableWidgetItem('0'))  # completed   
                     self.table.setItem(row_position, 7, QTableWidgetItem('NEXT'))  # status
                     self.color_row(row_position, QColor(255, 200, 100))
 
@@ -579,6 +581,7 @@ class TableApp(QWidget):
         self.name_field.clear()
         self.outfeed, self.infeed = False, False
         self.reset_style(self.infeed_field, 'IDLE')
+        self.worker.stop()
         self.worker.reassign(0, 3)
 
 
