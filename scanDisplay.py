@@ -63,6 +63,7 @@ class TCPWorker(QRunnable):
     '''
 
     def __init__(self, table, ip, port, row, col):
+        super().__init__()
         self.table = table
         self.host = ip
         self.port = port
@@ -70,6 +71,7 @@ class TCPWorker(QRunnable):
         self.active = False
         self.row = row
         self.col = col
+        self.running = True
 
     """def __init__(self, qty : int, host, port, row):
         super().__init__()
@@ -122,16 +124,17 @@ class TCPWorker(QRunnable):
     @Slot()
     def run(self):
         self.active = True
-        while True:
+        while self.running:
             self.start_plc_comm()
             time.sleep(5)
 
 
     def start_plc_comm(self):
         num_rows = self.table.rowCount()
-        order_no = self.table.item(self.row, 0)
+
         if self.col < 7 and self.row < num_rows:
-            req_qty = self.table.item(self.row, self.col)
+            order_no = self.table.item(self.row, 0).text()
+            req_qty = self.table.item(self.row, self.col).text()
             if self.col == 3:
                 self.create_req_qty_msg(order_no, req_qty)
             elif self.col == 4:
@@ -142,58 +145,57 @@ class TCPWorker(QRunnable):
                 self.create_req_completed_msg(order_no)
         
 
-    def create_req_qty_msg(self, order_no, req_qty):
+    def create_req_qty_msg(self, order_no : str, req_qty : str):
         data = '|'.join(['R101', order_no, req_qty])
         self.send_tcp(data)
         
-    def create_req_good_msg(self, order_no):
+    def create_req_good_msg(self, order_no : str):
         data = '|'.join(['R102', order_no])
         self.send_tcp(data)
     
-    def create_req_defect_msg(self, order_no):
+    def create_req_defect_msg(self, order_no : str):
         data = '|'.join(['R103', order_no])
         self.send_tcp(data)
     
-    def create_req_completed_msg(self, order_no):
+    def create_req_completed_msg(self, order_no : str):
         data = '|'.join(['R104', order_no])
         self.send_tcp(data)
 
-    def send_tcp(self, payload):
+    def send_tcp(self, payload : str):
         logger.info(f'Sending to PLC --- {dt.now()}')
         data = payload.encode('ASCII')
         success = True
         retry  = 2
         while retry > 0:
-            if not success:
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.connect((self.host, self.port))
-                        logger.info(f'Sending {self.data} to plc')
-                        # s.sendall(self.data.to_bytes(2, 'big'))
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.connect((self.host, self.port))
+                    logger.info(f'Sending {data} to plc')
+                    # s.sendall(self.data.to_bytes(2, 'big'))
 
-                        s.sendall(data)
-                        resp = s.recv(self.recv_bytes)
-                        if resp:
-                            logger.info(f'Reply from TCP server: {resp}')
-                            success = True
-                            retry = 0
-                        else:
-                            logger.info(f'No response from plc')
+                    s.sendall(data)
+                    resp = s.recv(4096)
+                    if resp:
+                        logger.info(f'Reply from TCP server: {resp}')
+                        success = True
+                        retry = 0
+                    else:
+                        logger.info(f'No response from plc')
 
-                except ConnectionRefusedError:
-                    logger.error("TCP connection refused", exc_info=True)
-                    self.signal.conn.emit(0)
-                    time.sleep(1)
-                    success = False
-                    retry -= 1
-                except AttributeError:
-                    logger.error(f'Data is not int : {self.data}', exc_info=True)
-                    time.sleep(1)
-                    retry = -1
-                    success = False
-                except socket.timeout:
-                    logger.error("Timeout", exc_info=True)
-                    time.sleep(2)
+            except ConnectionRefusedError:
+                logger.error("TCP connection refused", exc_info=True)
+                self.signal.conn.emit(0)
+                time.sleep(1)
+                success = False
+                retry -= 1
+            except AttributeError:
+                logger.error(f'Data is not int : {data}', exc_info=True)
+                time.sleep(1)
+                retry = -1
+                success = False
+            except socket.timeout:
+                logger.error("Timeout", exc_info=True)
+                time.sleep(2)
 
         if success:
             self.signal.conn.emit(1)
@@ -212,6 +214,9 @@ class TCPWorker(QRunnable):
 
     def is_active(self):
         return self.active
+
+    def stop(self):
+        self.running = False
 
 
 class TableApp(QWidget):
@@ -243,6 +248,12 @@ class TableApp(QWidget):
         self.queue = Queue()
         self.threadpool = QThreadPool()
         self.worker = TCPWorker(self.table, self.tcp_ip, self.tcp_port, 0, 3)
+
+
+    def closeEvent(self, event):
+        self.worker.stop()
+        self.threadpool.waitForDone()
+        super().closeEvent(event)
 
 
     def initUI(self):
@@ -343,15 +354,16 @@ class TableApp(QWidget):
 
 
     def process_lot_num(self):
+        # Process travel sheet which triggers thread
+        # to process kanbans from table
         travel_sheet_num = self.name_field.text()
-        logger.info("GOT THE TRAVELLER")
         logger.info(travel_sheet_num.strip())
         if travel_sheet_num.strip() != "":
-            logger.info("good NOW")
+            logger.info(f"Rec: {travel_sheet_num}")
             if travel_sheet_num != self.travel_sheet:  # new travel sheet
                 self.travel_sheet = travel_sheet_num  # update travel sheet number
-                if not self.worker.is_active:
-                    logger.info("ACTIVE NOW")
+                if not self.worker.is_active():
+                    logger.info("Starting PLC thread...")
                     # running for first time
                     self.worker.signal.result.connect(self.get_plc_status)
                     self.worker.signal.fail.connect(self.get_plc_status)
@@ -467,13 +479,13 @@ class TableApp(QWidget):
         if msg_list[0] == 'M101':
             logger.info(f"Reply from plc: {resp}")
         elif msg_list[0] == 'M102':
-            self.set_col_text(row, col, msg_list[2])
+            self.set_col_text(row, col, msg_list[1])
         elif msg_list[0] == 'M103':
-            self.set_col_text(row, col, msg_list[2])
+            self.set_col_text(row, col, msg_list[1])
         elif msg_list[0] == 'M104':
-            self.set_col_text(row, col, msg_list[2])
-            self.set_col_text(row, 6, "COMPLETED")
-            self.color_row(row, QColor(255, 200, 100))
+            self.set_col_text(row, col, msg_list[1])
+            self.set_col_text(row, 7, "COMPLETED")
+            self.color_row(row, QColor(	144, 238, 144))
             row += 1  # go to next row
             self.worker.reassign(row, 3)  # change row and col for thread
 
@@ -570,6 +582,7 @@ class TableApp(QWidget):
         self.worker.reassign(0, 3)
 
 
+# Parent window
 class MainWindow(QMainWindow):
     def __init__(self, pipe, config):
         super().__init__()
@@ -578,6 +591,11 @@ class MainWindow(QMainWindow):
 
         self.table = TableApp(pipe, config)
         self.setCentralWidget(self.table)
+    
+
+    def closeEvent(self, event):
+        self.table.close()  # Ensure the child window is closed
+        super().closeEvent(event)  # Call the base class implementation
 
 
 if __name__ == '__main__':
