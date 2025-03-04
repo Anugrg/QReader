@@ -174,7 +174,7 @@ def save_to_file(prefix, input_val, name, _pipe):
 
     # order no.
     order_no = re.search(r"\d{9}$", scan).group()
-    #data_row.append(order_no)
+    data_row.append(order_no)
     logger.info(f'Order no.: {order_no}')
 
     # quantity
@@ -187,6 +187,7 @@ def save_to_file(prefix, input_val, name, _pipe):
     
     # data.append(data_row)
 
+    # [model no, package code, order no, qty, COM ]
     data_row.append(name)
     logger.info("Sending data to table")
     _pipe.send(data_row)
