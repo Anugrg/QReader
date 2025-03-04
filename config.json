@@ -15,7 +15,10 @@
                 "timeout": 1
             }
     ],
-
+    
+    "INFEED": "COM8",
+    "OUTFEED": "COM9",
+    
     "PLC_TCP_IP": "127.0.0.1",
     "PLC_TCP_PORT": 65432
 }

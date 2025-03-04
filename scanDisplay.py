@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import json
 import base64
 import multiprocessing as mp
 import logging
@@ -12,7 +13,7 @@ import socket
 from PySide6.QtWidgets import (QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QDateEdit)
 from PySide6.QtCore import  QObject, Signal, Slot, QByteArray, QRunnable, QThreadPool, QTimer, Qt
-from PySide6.QtGui import QPixmap, QColor, QBrush
+from PySide6.QtGui import QPixmap, QColor, QBrush, QMovie
 
 
 import readScanner as scanner
@@ -100,102 +101,165 @@ class TCPWorker(QRunnable):
 
 class TableApp(QWidget):
 
-    def __init__(self, pipe):
+    def __init__(self, pipe, config):
         super().__init__()
         logger.info("Table rendered...")
         logger.info(pipe)
         self.pipe = pipe
+        self.infeed = False
+        self.outfeed = False
+        self.tcp_ip = config.get('PLC_TCP_IP')
+        self.tcp_port = config.get('PLC_TCP_PORT')
+        self.scanner_infeed = config.get('INFEED')
+        self.scanner_outfeed = config.get('OUTFEED')
         self.initUI()
         logger.info("Setting up Signal...")
-        
-
         # thread to fetch data from pipe
         self.communicator = Communicator()
         self.communicator.data_received.connect(self.add_row)
         self.t = Thread(target=self.read_from_pipe)
         self.t.daemon = True
         self.t.start()
-
         self.threadpool = QThreadPool()
 
 
     def initUI(self):
         self.setWindowTitle('Barcode Scanner Reader Display')
         self.setGeometry(100, 100, 2200, 800)
+
         layout = QVBoxLayout()
         plc_layout = QHBoxLayout()
 
-        self.plc_tcp_status = QLabel("PLC:")
+        self.plc_tcp_status = QLabel("PLC Connection:")
         self.plc_tcp_status.setFixedWidth(50)
+        # Set padding (left, top, right, bottom)
+        self.plc_tcp_status.setContentsMargins(80, 10, 20, 10)
 
         self.plc_tcp_status_text = QLineEdit("Waiting")
         self.plc_tcp_status_text.setReadOnly(True)
         self.plc_tcp_status_text.setFixedWidth(80)
 
+        self.date_label = QLabel("Date")
+        self.date_label.setFixedWidth(50)
+
+        self.date_field = QLineEdit()
+        self.date_field.setText(dt.today().strftime('%Y-%m-%d'))
+        self.date_field.setStyleSheet("background-color: lightgrey;color:white")
+        self.date_field.setReadOnly(True)
+
         self.chk_conn_button = QPushButton('Check', self)
         self.chk_conn_button.clicked.connect(self.check_tcp_status)
 
+        plc_layout.addWidget(self.date_label)
+        plc_layout.addWidget(self.date_field)
         plc_layout.addWidget(self.plc_tcp_status)
         plc_layout.addWidget(self.plc_tcp_status_text)
         plc_layout.addWidget(self.chk_conn_button)
-        plc_layout.setSpacing(0)
-        plc_layout.setContentsMargins(5, 5, 5, 5)
-        plc_layout.setAlignment(self.plc_tcp_status, Qt.AlignLeft)
+        
+        plc_layout.setSpacing(5)
         plc_layout.setAlignment(self.plc_tcp_status_text, Qt.AlignLeft)
         plc_layout.addStretch()
 
         # Input layout
         input_layout = QHBoxLayout()
-        self.date_field = QLineEdit()
-        self.date_field.setText(dt.today().strftime('%Y-%m-%d'))
-        self.date_field.setReadOnly(True)
-        self.name_field = QLineEdit(self)
-        self.name_field.setMinimumWidth(350)
-        self.label = QLabel("Lot no.")
-        self.name_field.setPlaceholderText('Lot no.')
 
-        input_layout.addWidget(self.date_field)
+        self.name_field = QLineEdit(self)
+        self.name_field.setPlaceholderText('Lot no.')
+        self.name_field.setMinimumWidth(350)
+
+        self.label = QLabel("Lot no.")
+
         input_layout.addWidget(self.label)
         input_layout.addWidget(self.name_field)
-        self.start_button = QPushButton('Start', self)
-        self.start_button.clicked.connect(self.send_tcp)
-        input_layout.addWidget(self.start_button)
+
+        self.infeed_button = QPushButton('Send to PLC', self)
+        self.infeed_button.clicked.connect(self.send_to_plc)
+        input_layout.addWidget(self.infeed_button)
 
         self.success_color = QColor(200, 255, 200)
         self.fail_color = QColor(255, 200, 200)
 
+        # feed process
+        feed_status_layout = QHBoxLayout()
+        self.infeed_label = QLabel("Infeed")
+        self.infeed_field = QLineEdit(self)
+        self.infeed_field.setPlaceholderText('Idle')
+        self.infeed_field.setStyleSheet("background-color: lightgrey;color:white")
+        self.infeed_field.setReadOnly(True)
+
+        self.set_infeed_btn = QPushButton('Set infeed', self)
+        self.set_infeed_btn.clicked.connect(self.set_in_status)
+
+        feed_status_layout.addWidget(self.infeed_label)
+        feed_status_layout.addWidget(self.infeed_field)
+        feed_status_layout.addWidget(self.set_infeed_btn)
+
+
         # Table
         self.table = QTableWidget(self)
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(['Model', 'Packing Code', 'Quantity', 'PLC'])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(['Model', 'Packing Code', 'Quantity', 'PLC Infeed', 'PLC Outfeed'])
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
+
+        self.loading_label = QLabel(self)
+        self.loading_label.setAlignment(Qt.AlignCenter)
+        self.loading_movie = QMovie("loading.gif")
+        self.loading_label.setMovie(self.loading_movie)
+        self.loading_label.setStyleSheet("background: transparent;")
+        self.loading_label.setVisible(False)
 
         # Clear button
         self.clear_button = QPushButton('Clear', self)
         self.clear_button.clicked.connect(self.clear_table)
- 
+
+        self.save_table_btn = QPushButton('Save', self)
+        self.save_table_btn.clicked.connect(self.save_table)
+
         layout.addLayout(plc_layout)
         layout.addLayout(input_layout)
+        layout.addLayout(feed_status_layout)
         layout.addWidget(self.table)
+        layout.addWidget(self.save_table_btn)
         layout.addWidget(self.clear_button)
-        self.check_tcp_status()
+
         self.setLayout(layout)
+        
+        self.check_tcp_status()
+
+
+    def start_load(self):
+        self.loading_label.setVisible(True)
+        self.loading_movie.start()
+        self.loading_label.setGeometry(self.table.geometry())
+        # Simulate a long-running action
+        # QTimer.singleShot(4000, self.stop_load)
+
+    def stop_load(self):
+        self.loading_movie.stop()
+        self.loading_label.setVisible(False)
+
+    def reset_style(self, widget, text):
+        widget.setText(text)
+        widget.setStyleSheet("background-color: lightgrey;color:white")
+
 
     def check_tcp_status(self):
+
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect(('127.0.0.1', 65432))
+                s.connect((self.tcp_ip, self.tcp_port))
                 logger.info(s.getpeername())
                 self.plc_tcp_status_text.setText('CONNECTED')
+                self.plc_tcp_status_text.setStyleSheet("background-color: green;color:white")
 
         except ConnectionRefusedError:
             self.plc_tcp_status_text.setText('FAILED')
+            self.plc_tcp_status_text.setStyleSheet("background-color: red;color:white")
             logger.error("TCP connection refused", exc_info=True)
 
 
     def toggle_tcp_conn(self, status):
-
         if status:
             self.plc_tcp_status_text.setText('CONNECTED')
         else:
@@ -210,60 +274,158 @@ class TableApp(QWidget):
                 self.communicator.data_received.emit(data)
 
 
-    def send_tcp(self):
-        for row in range(self.table.rowCount()):
-            if self.table.item(row, 3).text() == 'SUCCESS':
-                continue
+    def send_to_plc(self):
+        '''
+        Sends qty to PLC via TCP
+        '''
 
-            qty = self.table.item(row, 2).text()
-            worker = TCPWorker(int(qty), '127.0.0.1', 65432, row)
+        if not self.infeed:  # if outfeed is false it means
+            for row in range(self.table.rowCount()):
+                if self.table.item(row, 3).text() == 'OK':
+                    continue
+
+                qty = self.table.item(row, 2).text()
+                self.send_tcp(row, qty)
+
+
+    def send_tcp(self, row, data):
+        '''
+        Func to transfer to PLC
+        '''
+
+        try:
+            worker = TCPWorker(int(data), self.tcp_ip, self.tcp_port, row)
             worker.signal.result.connect(self.get_plc_status)
             worker.signal.fail.connect(self.get_plc_status)
             worker.signal.conn.connect(self.toggle_tcp_conn)
             self.threadpool.start(worker)
+        except:
+            logging.error("Worker failed", exc_info=True)
+
+
+    def set_in_status(self):
+
+        if self.infeed:
+            self.infeed = False
+            self.reset_style(self.infeed_field, 'Idle')
+        else:
+
+            num_data = self.table.rowCount()
+
+            if num_data > 0:
+                count = 0
+                for row in range(self.table.rowCount()):
+                    if self.table.item(row, 3).text() == 'OK':
+                        count += 1
+
+                if count == num_data and not self.outfeed:
+
+                    self.infeed = True
+                    self.infeed_field.setText(f"Scanned {count} QR")
+                    self.infeed_field.setStyleSheet("background-color: green;color:white")
+
 
     def get_plc_status(self, result):
+        col = 3
+        if self.infeed:
+            col = 4
         status, row = result
         logger.info(f"Sent to plc success: {status}")
         if status:
-            self.table.setItem(row, 3, QTableWidgetItem('SUCCESS'))
-            self.table.item(row, 3).setBackground(QBrush(self.success_color))
+            self.table.setItem(row, col, QTableWidgetItem('OK'))
+            self.table.item(row, col).setBackground(QBrush(self.success_color))
         else:
-            self.table.setItem(row, 3, QTableWidgetItem('FAIL'))
-            self.table.item(row, 3).setBackground(QBrush(self.fail_color))
+            self.table.setItem(row, col, QTableWidgetItem('FAIL'))
+            self.table.item(row, col).setBackground(QBrush(self.fail_color))
 
+
+    def get_row_by_column_value(self, column, model) -> int:
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, column)
+            if item and item.text() == model:
+                return row, self.table.item(row, 2).text()
+
+
+    def check_row_exists(self, column, model):
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, column)
+            if item and item.text() == model:
+                return True
+    
+        return False
+
+
+    def check_outfeed(self, data : list):
+        '''
+        After infeed, rows are set
+        At outfeed, check if scanned QR matches
+        by sending qty again to PLC
+        '''
+        try:
+            row_indx, qty = self.get_row_by_column_value(0, data[0])
+
+            self.send_tcp(row_indx, qty)
+        except TypeError as e:
+            logging.ERROR("Row is not present")
 
 
     @Slot(list)
-    def add_row(self, data):
+    def add_row(self, data : list):
         logger.info(f"Data received: {data}")
-        if data and len(data) == 3:
-            model, packing_code, quantity = data
-            row_position = self.table.rowCount()
-            self.table.insertRow(row_position)
-            self.table.setItem(row_position, 0, QTableWidgetItem(model))
-            self.table.setItem(row_position, 1, QTableWidgetItem(packing_code))
-            self.table.setItem(row_position, 2, QTableWidgetItem(quantity))
-            self.table.setItem(row_position, 3, QTableWidgetItem('Idle'))
-            # self.send_tcp(int(data[-1])) 
+
+        if data and len(data) == 4:
+            model, packing_code, quantity, COM = data
+
+            if COM==self.scanner_outfeed and self.infeed:
+                self.check_outfeed(data)
+
+            elif COM==self.scanner_infeed and not self.infeed:
+                exists = self.check_row_exists(0, model)
+                if not exists:
+                    row_position = self.table.rowCount()
+                    self.table.insertRow(row_position)
+                    self.table.setItem(row_position, 0, QTableWidgetItem(model))
+                    self.table.setItem(row_position, 1, QTableWidgetItem(packing_code))
+                    self.table.setItem(row_position, 2, QTableWidgetItem(quantity))
+                    self.table.setItem(row_position, 3, QTableWidgetItem('Idle'))
+                    self.table.setItem(row_position, 4, QTableWidgetItem('Idle'))
 
         else:
             self.name_field.clear()
             self.name_field.setText(data[0])
 
 
+    def save_table(self):
+        _date = dt.today().strftime('%Y_%m_%d')
+        dest_folders = os.path.join(os.getcwd(), _date)
+        if self.table.rowCount() > 0:
+            data = []
+            data_header = ['Model', 'Packing code', 'Quantity']
+            for row in range(self.table.rowCount()):
+                data.append([self.table.item(row, 0).text(), self.table.item(row, 1).text(), self.table.item(row, 2).text()])
+
+            scanner.create_dir(dest_folders)
+            scanner.create_excel(data, data_header, dest_folders, 'MRE_QR_kanban_info.xlsx')
+
+        if bool(self.name_field.text()):
+            scanner.save_to_disk(self.name_field.text(), dest_folders)
+
+
     def clear_table(self):
         self.table.setRowCount(0)
+        self.name_field.clear()
+        self.outfeed, self.infeed = False, False
+        self.reset_style(self.infeed_field, 'Idle')
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, pipe):
+    def __init__(self, pipe, config):
         super().__init__()
         logger.info("Main window created...")
         self.setFixedHeight(650)
-        self.table = TableApp(pipe)
-        self.setCentralWidget(self.table)
 
+        self.table = TableApp(pipe, config)
+        self.setCentralWidget(self.table)
 
 
 if __name__ == '__main__':
@@ -283,7 +445,10 @@ if __name__ == '__main__':
     p.start()
     logging.info("Main window rendering")
 
-    window = MainWindow(parent_conn)
+    with open('config.json', 'r') as f:
+            config = json.load(f)
+
+    window = MainWindow(parent_conn, config)
     pixmap = QPixmap()
     pixmap.loadFromData(QByteArray(image_data))
 

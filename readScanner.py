@@ -63,8 +63,10 @@ class ScanReaderThread(Thread):
 
     def __init__(self, config : json, queue, _pipe):
         Thread.__init__(self)
+
         logger.debug('Starting thread ok')
         self.config = config
+        self.name = self.config.get('COM')
         logging.info('Listening at ' + self.config.get('COM'))
         self.ser = serial.Serial(self.config.get('COM'), self.config.get('Baud'), timeout=self.config.get('timeout'))
         self.queue = queue
@@ -74,8 +76,7 @@ class ScanReaderThread(Thread):
         while True:
             if self.ser.in_waiting > 0:
                 data = self.ser.readline().decode('utf-8').rstrip()  # barcode
-                print(data)
-                process_data(data, self.queue, self._pipe)
+                process_data(data, self.name, self._pipe)
 
 
 class PLCSenderThread(Thread):
@@ -141,20 +142,21 @@ def create_excel(data, data_header, dest_folders, filename):
     else:
         logger.info('adding row')
         logger.info(data)
-        df.loc[len(df)] = data[0]
+        for row in data:
+            df.loc[len(df)] = row
 
     df.to_excel(target_file, index=False)
 
 
-def save_to_file(prefix, input_val, queue, _pipe):
+def save_to_file(prefix, input_val, name, _pipe):
 
     scan = re.findall(r"MA.*", input_val)[0]
-    data_header = ['Model', 'Packing code', 'Quantity']
-    data = []
+    # data_header = ['Model', 'Packing code', 'Quantity']
+    #data = []
     data_row = []
     year = dt.today().strftime('%Y')
     ref_no_re = re.findall(r"\d{7}" + year, scan)[0]
-    ref_no =  re.match(r"^\d{7}", ref_no_re).group()
+    ref_no =  re.match(r"^\d{7}", ref_no_re).group() 
     # data_row.append(ref_no)
     logger.info(f'Ref no.: {ref_no}')
 
@@ -181,45 +183,45 @@ def save_to_file(prefix, input_val, queue, _pipe):
 
     # send this info to PLC
     # queue.put(int(qty[:-1]))
-    logger.info("Waiting for PLC transmission...")
     # queue.join()
+    
+    # data.append(data_row)
 
-    data.append(data_row)
+    data_row.append(name)
     logger.info("Sending data to table")
     _pipe.send(data_row)
 
-    print(tabulate(data, headers=data_header, tablefmt="grid", showindex="always"))
+    #print(tabulate(data, headers=data_header, tablefmt="grid", showindex="always"))
 
-    _date = dt.today().strftime('%Y_%m_%d')
+    '''_date = dt.today().strftime('%Y_%m_%d')
     dest_folders = os.path.join(os.getcwd(), _date)
     create_dir(dest_folders)
-    create_excel(data, data_header, dest_folders, 'MRE_QR_kanban_info.xlsx')
+    create_excel(data, data_header, dest_folders, 'MRE_QR_kanban_info.xlsx')'''
     
 
-def save_to_disk(prefix, lot_number, _pipe):
+def save_to_disk(lot_number, dest_folders):
     data = []
     data_header = ['Lot no.']
     data.append(lot_number)
-    _pipe.send(data)
 
-    _date = dt.today().strftime('%Y_%m_%d')
-    dest_folders = os.path.join(os.getcwd(), _date)
     create_dir(dest_folders)
     create_excel(data, data_header, dest_folders, 'lot_numbers.xlsx')
 
 
-def process_data(data : str, queue, _pipe):
+def process_data(data : str, name, _pipe):
     if data.startswith('DISC'):
-        save_to_file('DISC', data, queue, _pipe)
+        save_to_file('DISC', data, name, _pipe)
     elif data.startswith('MA'):
-        save_to_disk('MA', data, _pipe)
+
+        _pipe.send([data])
+        # save_to_disk('MA', data, _pipe)
 
 
 def process_with_threads(conf : json, _pipe):
     com_info = conf.get('settings')
-    debug = True
+    DEBUG = False
     queue = Queue()
-    threads = []
+
     try:
         for i in range(len(com_info)):
             logger.info(com_info[i])
@@ -231,7 +233,7 @@ def process_with_threads(conf : json, _pipe):
             t.start()
     except Exception as e:
         logger.error("Scanner thread creation failed", exc_info=True)
-    print(threads)
+
     # tcp = TCPClient(conf.get('PLC_TCP_IP'), conf.get('PLC_TCP_PORT'))
     # try:
     #     t = PLCSenderThread(queue, tcp)

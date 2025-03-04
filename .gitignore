@@ -10,3 +10,7 @@ requirements.txt
 *.zip
 __pycache__/
 *.log
+*.gif
+test.py
+create_table.py
+kanbanQR
