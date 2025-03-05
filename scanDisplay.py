@@ -55,7 +55,7 @@ class TcpSignals(QObject):
 
 
 class TCPServerSignals(QObject):
-    data = Signal(str)
+    data = Signal(tuple)
 
 class Communicator(QObject):
     data_received = Signal(list)
@@ -63,13 +63,16 @@ class Communicator(QObject):
 
 class TCPServerWorker(QRunnable):
     
-    def __init__(self, ip, port):
+    def __init__(self, ip, port, table, row, col):
         super().__init__()
         self.host = ip
         self.port = port
         self.signal = TCPServerSignals()
         self.running = True
         self.close_conn = False
+        self.table = table
+        self.row = row
+        self.col = col
 
     def stop(self):
         self.running = False
@@ -80,6 +83,7 @@ class TCPServerWorker(QRunnable):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind((self.host, self.port))
         server.listen()
+
         logging.info(f"[*] Listening on {self.host}:{self.port}")
         try:
             while self.running:
@@ -89,14 +93,44 @@ class TCPServerWorker(QRunnable):
                 print(f"[*] Accepted connection from {addr[0]}:{addr[1]} {self.running}")
                 data = client_socket.recv(4096)
 
-                if data:
-                    print('payload')
-                    payload = data.decode('ASCII')
-                    self.signal.data.emit(payload)
+                ret = self.process_msg(data)
+                if ret:
+                    client_socket.sendall(self.process_msg(data))
+                
+                client_socket.close()
 
         except KeyboardInterrupt:
             sys.exit()
-            
+        except ValueError:
+            logger.error("Value Error", exc_info=True)
+    
+    def process_msg(self, data):
+        msg = data.decode('ASCII')
+        resp = ''
+        cmd_id = msg.split('|')[0]
+        num_rows = self.table.rowCount()
+
+        if self.col < 7 and self.row < num_rows:
+            model = self.table.item(self.row, 1).text()
+            req_qty = self.table.item(self.row, self.col).text()
+            status = self.table.item(self.row, 7).text()  # status column helps keep track
+            if status != 'COMPLETED':
+                if cmd_id == 'M101':
+                
+                    self.signal.data.emit((msg, self.row))
+                    return self.create_req_qty_msg(model, req_qty)
+                    
+                else:
+                    self.signal.data.emit((msg, self.row))
+
+    def create_req_qty_msg(self, order_no : str, req_qty : str):
+        data = '|'.join(['R101', order_no, req_qty])
+        
+        return data.encode('ASCII')
+    
+    def reassign(self, row, col):
+        self.row = row
+        self.col = col
 
 
 class TCPWorker(QRunnable):
@@ -217,19 +251,19 @@ class TCPWorker(QRunnable):
 
     def create_req_qty_msg(self, order_no : str, req_qty : str):
         data = '|'.join(['R101', order_no, req_qty])
-        self.send_tcp(data)
+        # self.send_tcp(data)
 
     def create_req_good_msg(self, order_no : str):
         data = '|'.join(['R102', order_no])
-        self.send_tcp(data)
+        # self.send_tcp(data)
 
     def create_req_defect_msg(self, order_no : str):
         data = '|'.join(['R103', order_no])
-        self.send_tcp(data)
+        # self.send_tcp(data)
     
     def create_req_completed_msg(self, order_no : str):
         data = '|'.join(['R104', order_no])
-        self.send_tcp(data)
+        # self.send_tcp(data)
 
     def send_tcp(self, payload : str):
         logger.info(f'Sending to PLC --- {dt.now()}')
@@ -313,15 +347,16 @@ class TableApp(QWidget):
         self.t.start()
         self.queue = Queue()
         self.threadpool = QThreadPool()
-        self.server = TCPServerWorker(self.server_ip, self.server_port)
-        self.worker = TCPWorker(self.table, self.tcp_ip, self.tcp_port, 0, 3)
-        self.server.signal.data.connect(self.worker.handle_plc_msg)
+        self.server = TCPServerWorker(self.server_ip, self.server_port, self.table, 0, 3)
+        # self.worker = TCPWorker(self.table, self.tcp_ip, self.tcp_port, 0, 3)
+        # self.server.signal.data.connect(self.worker.handle_plc_msg)
+        self.server.signal.data.connect(self.get_plc_status2)
         self.threadpool.start(self.server)
 
 
     def closeEvent(self, event):
         self.server.stop()
-        self.worker.stop()
+        # self.worker.stop()
         self.threadpool.waitForDone()
         super().closeEvent(event)
 
@@ -397,14 +432,36 @@ class TableApp(QWidget):
         self.save_table_btn = QPushButton('Save', self)
         self.save_table_btn.clicked.connect(self.save_table)
 
+        self.good_label = QLabel("Good Qty")
+        self.good_field = QLineEdit()
+
+        self.defect_label = QLabel("Defective Qty")
+        self.defect_field = QLineEdit()
+
+        self.completed_label = QLabel("Completed Qty")
+        self.completed_field = QLineEdit()
+
         layout.addLayout(plc_layout)
         layout.addLayout(input_layout)
         layout.addWidget(self.table)
-        layout.addWidget(self.save_table_btn)
-        layout.addWidget(self.clear_button)
+
+        foot_layout = QHBoxLayout()
+        foot_layout.addWidget(self.good_label)
+        foot_layout.addWidget(self.good_field)
+
+        foot_layout.addWidget(self.defect_label)
+        foot_layout.addWidget(self.defect_field)
+
+        foot_layout.addWidget(self.completed_label)
+        foot_layout.addWidget(self.completed_field)
+        foot_layout.addWidget(self.save_table_btn)
+        foot_layout.addWidget(self.clear_button)
+
+        layout.addLayout(foot_layout)
+
 
         self.setLayout(layout)
-        self.check_tcp_status()
+        #self.check_tcp_status()
 
 
     def process_lot_num(self):
@@ -416,17 +473,17 @@ class TableApp(QWidget):
             logger.info(f"Rec: {travel_sheet_num}")
             if travel_sheet_num != self.travel_sheet:  # new travel sheet
                 self.travel_sheet = travel_sheet_num  # update travel sheet number
-                if not self.worker.is_active():
-                    logger.info("Starting PLC thread...")
-                    # running for first time
-                    self.worker.signal.result.connect(self.get_plc_status)
-                    self.worker.signal.fail.connect(self.get_plc_status)
-                    self.worker.signal.conn.connect(self.toggle_tcp_conn)
-                    self.threadpool.start(self.worker)
-                    self.set_col_text(0, 7, 'RUNNING')
-                    self.color_row(0, QColor(235, 169, 158))
-                elif not self.worker.running:
-                    self.worker.running = True
+                # if not self.worker.is_active():
+                #     logger.info("Starting PLC thread...")
+                #     # running for first time
+                #     self.worker.signal.result.connect(self.get_plc_status)
+                #     self.worker.signal.fail.connect(self.get_plc_status)
+                #     self.worker.signal.conn.connect(self.toggle_tcp_conn)
+                #     self.threadpool.start(self.worker)
+                #     self.set_col_text(0, 7, 'RUNNING')
+                #     self.color_row(0, QColor(235, 169, 158))
+                # elif not self.worker.running:
+                #     self.worker.running = True
 
 
     def reset_style(self, widget, text):
@@ -528,7 +585,6 @@ class TableApp(QWidget):
                     self.infeed_field.setText(f"Scanned {count} QR")
                     self.infeed_field.setStyleSheet("background-color: green;color:white")
 
-
     def get_plc_status(self, result):
 
         # Receives data from TCPCLient thread
@@ -549,6 +605,33 @@ class TableApp(QWidget):
             self.color_row(row, QColor(	144, 238, 144))
             row += 1  # go to next row
             self.worker.reassign(row, 3)  # change row and col for thread
+
+
+
+    def get_plc_status2(self, result):
+        # Receives data TCPServer worker
+
+
+        msg, row = result
+        msg_list = msg.split('|')
+
+        if msg_list[0] == 'M101':
+            logger.info(f"Reply from plc:{msg_list}")
+            self.set_col_text(0, 7, 'RUNNING')
+            self.color_row(0, QColor(235, 169, 158))
+            self.server.reassign(row, 4)
+        elif msg_list[0] == 'M102':
+            self.set_col_text(row, 4, msg_list[1])
+            self.server.reassign(row, 5)
+        elif msg_list[0] == 'M103':
+            self.set_col_text(row, 5, msg_list[1])
+            self.server.reassign(row, 6)
+        elif msg_list[0] == 'M104':
+            self.set_col_text(row, 6, msg_list[1])
+            self.set_col_text(row, 7, "COMPLETED")
+            self.color_row(row, QColor(	144, 238, 144))
+            row += 1  # go to next row
+            self.server.reassign(row, 3)  # change row and col for thread
 
 
     def get_row_by_column_value(self, column, model) -> int:
@@ -642,8 +725,7 @@ class TableApp(QWidget):
     def clear_table(self):
         self.table.setRowCount(0)
         self.name_field.clear()
-        self.worker.stop()
-        self.worker.reassign(0, 3)
+        self.server.reassign(0, 3)
 
 
 # Parent window
