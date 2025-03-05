@@ -135,14 +135,16 @@ class TCPWorker(QRunnable):
         if self.col < 7 and self.row < num_rows:
             order_no = self.table.item(self.row, 0).text()
             req_qty = self.table.item(self.row, self.col).text()
-            if self.col == 3:
-                self.create_req_qty_msg(order_no, req_qty)
-            elif self.col == 4:
-                self.create_req_good_msg(order_no)
-            elif self.col == 5:
-                self.create_req_defect_msg(order_no)
-            elif self.col == 6:
-                self.create_req_completed_msg(order_no)
+            status = self.table.item(self.row, 7).text()
+            if status!="COMPLETED":
+                if self.col == 3:
+                    self.create_req_qty_msg(order_no, req_qty)
+                elif self.col == 4:
+                    self.create_req_good_msg(order_no)
+                elif self.col == 5:
+                    self.create_req_defect_msg(order_no)
+                elif self.col == 6:
+                    self.create_req_completed_msg(order_no)
         
 
     def create_req_qty_msg(self, order_no : str, req_qty : str):
