@@ -54,8 +54,40 @@ class TcpSignals(QObject):
     conn = Signal(int)
 
 
+class TCPServerSignals(QObject):
+    data = Signal(str)
+
 class Communicator(QObject):
     data_received = Signal(list)
+
+
+class TCPServerWorker(QRunnable):
+    
+    def __init__(self, ip, port):
+        super().__init__()
+        self.host = ip
+        self.port = port
+        self.signal = TCPServerSignals()
+    
+    @Slot()
+    def run(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind((self.host, self.port))
+        server.listen()
+        logging.info(f"[*] Listening on {self.host}:{self.port}")
+
+        try:
+            while True:
+                client_socket, addr = server.accept()
+                print(f"[*] Accepted connection from {addr[0]}:{addr[1]}")
+                data = client_socket.recv(4096)
+                if data:
+                    payload = data.decode('ASCII')
+                    self.signal.emit(payload)
+
+        except KeyboardInterrupt:
+            sys.exit()
+
 
 class TCPWorker(QRunnable):
     '''
@@ -128,7 +160,6 @@ class TCPWorker(QRunnable):
             self.start_plc_comm()
             time.sleep(5)
 
-
     def start_plc_comm(self):
         num_rows = self.table.rowCount()
 
@@ -145,7 +176,7 @@ class TCPWorker(QRunnable):
                     self.create_req_defect_msg(order_no)
                 elif self.col == 6:
                     self.create_req_completed_msg(order_no)
-        
+
 
     def create_req_qty_msg(self, order_no : str, req_qty : str):
         data = '|'.join(['R101', order_no, req_qty])
@@ -315,21 +346,6 @@ class TableApp(QWidget):
         self.success_color = QColor(200, 255, 200)
         self.fail_color = QColor(255, 200, 200)
 
-        # feed process
-        feed_status_layout = QHBoxLayout()
-        self.infeed_label = QLabel("Infeed")
-        self.infeed_field = QLineEdit(self)
-        self.infeed_field.setPlaceholderText('Idle')
-        self.infeed_field.setStyleSheet("background-color: lightgrey;color:white")
-        self.infeed_field.setReadOnly(True)
-
-        self.set_infeed_btn = QPushButton('Set infeed', self)
-        self.set_infeed_btn.clicked.connect(self.set_in_status)
-
-        feed_status_layout.addWidget(self.infeed_label)
-        feed_status_layout.addWidget(self.infeed_field)
-        feed_status_layout.addWidget(self.set_infeed_btn)
-
         # Table
         self.table = QTableWidget(self)
         self.table.setColumnCount(8)
@@ -346,7 +362,6 @@ class TableApp(QWidget):
 
         layout.addLayout(plc_layout)
         layout.addLayout(input_layout)
-        layout.addLayout(feed_status_layout)
         layout.addWidget(self.table)
         layout.addWidget(self.save_table_btn)
         layout.addWidget(self.clear_button)
@@ -546,7 +561,7 @@ class TableApp(QWidget):
                     self.table.setItem(row_position, 3, QTableWidgetItem(quantity))  # req quantity
                     self.table.setItem(row_position, 4, QTableWidgetItem('0'))  # good
                     self.table.setItem(row_position, 5, QTableWidgetItem('0'))  # defect 
-                    self.table.setItem(row_position, 6, QTableWidgetItem('0'))  # completed   
+                    self.table.setItem(row_position, 6, QTableWidgetItem('0'))  # completed quantity
                     self.table.setItem(row_position, 7, QTableWidgetItem('NEXT'))  # status
                     self.color_row(row_position, QColor(255, 200, 100))
 
