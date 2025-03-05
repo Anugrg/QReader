@@ -68,25 +68,35 @@ class TCPServerWorker(QRunnable):
         self.host = ip
         self.port = port
         self.signal = TCPServerSignals()
-    
+        self.running = True
+        self.close_conn = False
+
+    def stop(self):
+        self.running = False
+        self.close_conn = True
+
     @Slot()
     def run(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind((self.host, self.port))
         server.listen()
         logging.info(f"[*] Listening on {self.host}:{self.port}")
-
         try:
-            while True:
+            while self.running:
+                if self.close_conn == True:
+                    break
                 client_socket, addr = server.accept()
-                print(f"[*] Accepted connection from {addr[0]}:{addr[1]}")
+                print(f"[*] Accepted connection from {addr[0]}:{addr[1]} {self.running}")
                 data = client_socket.recv(4096)
+
                 if data:
+                    print('payload')
                     payload = data.decode('ASCII')
-                    self.signal.emit(payload)
+                    self.signal.data.emit(payload)
 
         except KeyboardInterrupt:
             sys.exit()
+            
 
 
 class TCPWorker(QRunnable):
@@ -104,6 +114,8 @@ class TCPWorker(QRunnable):
         self.row = row
         self.col = col
         self.running = True
+        self.plc_ready = False
+        self.plc_reply = ''
 
     """def __init__(self, qty : int, host, port, row):
         super().__init__()
@@ -158,34 +170,59 @@ class TCPWorker(QRunnable):
         self.active = True
         while self.running:
             self.start_plc_comm()
-            time.sleep(5)
+            time.sleep(3)
 
     def start_plc_comm(self):
-        num_rows = self.table.rowCount()
 
-        if self.col < 7 and self.row < num_rows:
-            order_no = self.table.item(self.row, 0).text()
-            req_qty = self.table.item(self.row, self.col).text()
-            status = self.table.item(self.row, 7).text()
-            if status!="COMPLETED":
-                if self.col == 3:
-                    self.create_req_qty_msg(order_no, req_qty)
-                elif self.col == 4:
-                    self.create_req_good_msg(order_no)
-                elif self.col == 5:
-                    self.create_req_defect_msg(order_no)
-                elif self.col == 6:
-                    self.create_req_completed_msg(order_no)
+        if self.plc_ready:
+            print('PLC Ready')
+            logging.info('PLC Ready')
+            num_rows = self.table.rowCount()
+
+            if self.col < 7 and self.row < num_rows:
+                logging.info('Working to send')
+                model = self.table.item(self.row, 1).text()
+                req_qty = self.table.item(self.row, self.col).text()
+                status = self.table.item(self.row, 7).text()  # status column helps keep track
+                if status != "COMPLETED":
+                    if self.col == 3:
+                        self.create_req_qty_msg(model, req_qty)
+                    elif self.col == 4:
+                        self.create_req_good_msg(model)
+                    elif self.col == 5:
+                        self.create_req_defect_msg(model)
+                    elif self.col == 6:
+                        self.create_req_completed_msg(model)
+
+    @Slot(str)
+    def handle_plc_msg(self, msg):
+        self.signal.conn.emit(1)
+        self.plc_reply = msg.split('|')
+        print(self.plc_reply)
+        cmd_id = self.plc_reply[0]
+        print('Rec from server thread')
+        if cmd_id == 'M100':  # PLC ready msg
+            if not self.plc_ready:
+                self.plc_ready = True
+        else:
+            # result = int.from_bytes(resp, 'big')
+            resp = self.plc_reply
+            self.plc_ready = True
+            print(self.plc_ready, self.col)
+            if resp:
+                self.signal.result.emit((resp, self.row, self.col))
+            else:
+                self.signal.fail.emit((resp, self.row))
 
 
     def create_req_qty_msg(self, order_no : str, req_qty : str):
         data = '|'.join(['R101', order_no, req_qty])
         self.send_tcp(data)
-        
+
     def create_req_good_msg(self, order_no : str):
         data = '|'.join(['R102', order_no])
         self.send_tcp(data)
-    
+
     def create_req_defect_msg(self, order_no : str):
         data = '|'.join(['R103', order_no])
         self.send_tcp(data)
@@ -197,23 +234,27 @@ class TCPWorker(QRunnable):
     def send_tcp(self, payload : str):
         logger.info(f'Sending to PLC --- {dt.now()}')
         data = payload.encode('ASCII')
-        success = True
+        # success = True
         retry  = 2
         while retry > 0:
             try:
+                logging.info('Starting client in tcp client thread')
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.connect((self.host, self.port))
                     logger.info(f'Sending {data} to plc')
                     # s.sendall(self.data.to_bytes(2, 'big'))
 
                     s.sendall(data)
+                    
+                    self.plc_ready = False
                     resp = s.recv(4096)
-                    if resp:
-                        logger.info(f'Reply from TCP server: {resp}')
-                        success = True
-                        retry = 0
-                    else:
-                        logger.info(f'No response from plc')
+                    retry = 0
+                    # if resp:
+                    #     logger.info(f'Reply from TCP server: {resp}')
+                    #     success = True
+                    #     retry = 0
+                    # else:
+                    #     logger.info(f'No response from plc')
 
             except ConnectionRefusedError:
                 logger.error("TCP connection refused", exc_info=True)
@@ -229,16 +270,6 @@ class TCPWorker(QRunnable):
             except socket.timeout:
                 logger.error("Timeout", exc_info=True)
                 time.sleep(2)
-
-        if success:
-            self.signal.conn.emit(1)
-            #result = int.from_bytes(resp, 'big')
-            result = resp.decode('ASCII')
-            if resp:
-                self.signal.result.emit((result, self.row, self.col))
-                self.col += 1
-            else:
-                self.signal.fail.emit((result, self.row))
     
 
     def reassign(self, row, col):
@@ -265,6 +296,8 @@ class TableApp(QWidget):
 
         self.tcp_ip = config.get('PLC_TCP_IP')
         self.tcp_port = config.get('PLC_TCP_PORT')
+        self.server_ip = config.get('TCP_SERVER')
+        self.server_port = config.get('TCP_SERVER_PORT')
         self.scanner_infeed = config.get('INFEED')
         self.scanner_outfeed = config.get('OUTFEED')
         self.travel_sheet = ''
@@ -280,10 +313,14 @@ class TableApp(QWidget):
         self.t.start()
         self.queue = Queue()
         self.threadpool = QThreadPool()
+        self.server = TCPServerWorker(self.server_ip, self.server_port)
         self.worker = TCPWorker(self.table, self.tcp_ip, self.tcp_port, 0, 3)
+        self.server.signal.data.connect(self.worker.handle_plc_msg)
+        self.threadpool.start(self.server)
 
 
     def closeEvent(self, event):
+        self.server.stop()
         self.worker.stop()
         self.threadpool.waitForDone()
         super().closeEvent(event)
@@ -466,6 +503,7 @@ class TableApp(QWidget):
         '''
         Change text in col cell
         '''
+
         self.table.setItem(row, col, QTableWidgetItem(text))
 
 
@@ -493,14 +531,18 @@ class TableApp(QWidget):
 
     def get_plc_status(self, result):
 
-        resp, row, col = result
-        msg_list = resp.split('|')
+        # Receives data from TCPCLient thread
+
+        msg_list, row, col = result
         if msg_list[0] == 'M101':
-            logger.info(f"Reply from plc: {resp}")
+            logger.info(f"Reply from plc:{msg_list[1]} {msg_list[2]}")
+            self.worker.reassign(row, 4)
         elif msg_list[0] == 'M102':
             self.set_col_text(row, col, msg_list[1])
+            self.worker.reassign(row, 5)
         elif msg_list[0] == 'M103':
             self.set_col_text(row, col, msg_list[1])
+            self.worker.reassign(row, 6)
         elif msg_list[0] == 'M104':
             self.set_col_text(row, col, msg_list[1])
             self.set_col_text(row, 7, "COMPLETED")
@@ -514,6 +556,10 @@ class TableApp(QWidget):
             item = self.table.item(row, column)
             if item and item.text() == model:
                 return row, self.table.item(row, 2).text()
+
+
+    def get_col_value(self, row, col):
+        return self.table.item(row, col).text()
 
 
     def check_row_exists(self, column, order):
@@ -596,25 +642,25 @@ class TableApp(QWidget):
     def clear_table(self):
         self.table.setRowCount(0)
         self.name_field.clear()
-        self.outfeed, self.infeed = False, False
-        self.reset_style(self.infeed_field, 'IDLE')
         self.worker.stop()
         self.worker.reassign(0, 3)
 
 
 # Parent window
 class MainWindow(QMainWindow):
-    def __init__(self, pipe, config):
+    def __init__(self, pipe, config, p):
         super().__init__()
         logger.info("Main window created...")
         #self.setFixedHeight(650)
-
+        self.process = p
         self.table = TableApp(pipe, config)
         self.setCentralWidget(self.table)
     
 
     def closeEvent(self, event):
         self.table.close()  # Ensure the child window is closed
+
+        event.accept()
         super().closeEvent(event)  # Call the base class implementation
 
 
@@ -638,7 +684,7 @@ if __name__ == '__main__':
     with open('config.json', 'r') as f:
             config = json.load(f)
 
-    window = MainWindow(parent_conn, config)
+    window = MainWindow(parent_conn, config, p)
     pixmap = QPixmap()
     pixmap.loadFromData(QByteArray(image_data))
 
@@ -646,7 +692,9 @@ if __name__ == '__main__':
     window.setWindowTitle("Barcode Scanner Display")
 
     window.show()
-    sys.exit(app.exec())
     logging.info("Terminating process for scanner...")
+
+    sys.exit(app.exec())
     p.terminate()
     p.join()
+
