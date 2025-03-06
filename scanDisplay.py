@@ -36,7 +36,6 @@ file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 
-
 class CustomLineEdit(QLineEdit):
     text_set = Signal(str)
 
@@ -56,6 +55,9 @@ class TcpSignals(QObject):
 
 class TCPServerSignals(QObject):
     data = Signal(tuple)
+    conn = Signal(int)
+    report = Signal(str)
+    alive = Signal(int)
 
 class Communicator(QObject):
     data_received = Signal(list)
@@ -63,16 +65,19 @@ class Communicator(QObject):
 
 class TCPServerWorker(QRunnable):
     
-    def __init__(self, ip, port, table, row, col):
+    def __init__(self, ip, port, table, row, col, outfeed_data=[]):
         super().__init__()
         self.host = ip
         self.port = port
         self.signal = TCPServerSignals()
         self.running = True
         self.close_conn = False
+        self.plc_ready = False
         self.table = table
         self.row = row
         self.col = col
+        self.outfeed = False
+        self.outfeed_data = outfeed_data
 
     def stop(self):
         self.running = False
@@ -87,39 +92,55 @@ class TCPServerWorker(QRunnable):
         logging.info(f"[*] Listening on {self.host}:{self.port}")
         try:
             while self.running:
+                self.signal.alive.emit(1)
                 if self.close_conn == True:
                     break
                 client_socket, addr = server.accept()
                 print(f"[*] Accepted connection from {addr[0]}:{addr[1]} {self.running}")
+                self.signal.conn.emit(1)
                 data = client_socket.recv(4096)
-
                 ret = self.process_msg(data)
                 if ret:
-                    client_socket.sendall(self.process_msg(data))
-                
+                    print(ret)
+                    client_socket.sendall(ret)
                 client_socket.close()
 
         except KeyboardInterrupt:
             sys.exit()
         except ValueError:
+            self.signal.conn.emit(0)
             logger.error("Value Error", exc_info=True)
-    
+        except Exception as e:
+            self.signal.conn.emit(0)
+            self.signal.alive.emit(0)
+            logger.error("Socket failure", exc_info=True)
+
     def process_msg(self, data):
         msg = data.decode('ASCII')
         resp = ''
         cmd_id = msg.split('|')[0]
         num_rows = self.table.rowCount()
-
-        if self.col < 7 and self.row < num_rows:
+        if cmd_id == 'M100':
+            self.signal.report.emit('PLC is ready to send')
+            self.plc_ready = True
+        elif cmd_id == 'M105' and self.plc_ready:
+            # outfeed check
+            print(cmd_id)
+            if self.outfeed:
+                print(self.outfeed_data)
+                order, model, qty = self.outfeed_data
+                ret_msg = '|'.join(['R105', order, model, qty ])
+                self.signal.data.emit((msg, self.row))
+                return ret_msg.encode('ASCII')
+        elif self.col < 7 and self.row < num_rows and self.plc_ready:
             model = self.table.item(self.row, 1).text()
             req_qty = self.table.item(self.row, self.col).text()
             status = self.table.item(self.row, 7).text()  # status column helps keep track
             if status != 'COMPLETED':
-                if cmd_id == 'M101':
-                
+                if cmd_id == 'M101' and status == "NEXT":
+                    # send qty, model and order to PLC
                     self.signal.data.emit((msg, self.row))
-                    return self.create_req_qty_msg(model, req_qty)
-                    
+                    return self.create_req_qty_msg(model, req_qty)                    
                 else:
                     self.signal.data.emit((msg, self.row))
 
@@ -350,7 +371,10 @@ class TableApp(QWidget):
         self.server = TCPServerWorker(self.server_ip, self.server_port, self.table, 0, 3)
         # self.worker = TCPWorker(self.table, self.tcp_ip, self.tcp_port, 0, 3)
         # self.server.signal.data.connect(self.worker.handle_plc_msg)
-        self.server.signal.data.connect(self.get_plc_status2)
+        self.server.signal.conn.connect(self.check_tcp_status)
+        self.server.signal.data.connect(self.get_plc_status)
+        self.server.signal.report.connect(self.report_plc_state)
+        self.server.signal.alive.connect(self.check_pulse)
         self.threadpool.start(self.server)
 
 
@@ -385,14 +409,38 @@ class TableApp(QWidget):
         self.date_field.setStyleSheet("background-color: lightgrey;color:white")
         self.date_field.setReadOnly(True)
 
-        self.chk_conn_button = QPushButton('Check', self)
-        self.chk_conn_button.clicked.connect(self.check_tcp_status)
+        self.plc_state_label = QLabel("PLC State")
+        self.plc_state_text = QLineEdit()
+        self.plc_state_text.setReadOnly(True)
+
+        self.row_label = QLabel("Row")
+
+        self.row_text = QLineEdit()
+        self.row_text.setReadOnly(True)
+
+        self.tcp_label = QLabel("TCP Status")
+        self.tcp_text = QLineEdit()
+        self.tcp_text.setReadOnly(True)
+
+        # self.chk_conn_button = QPushButton('Check', self)
+        # self.chk_conn_button.clicked.connect(self.check_tcp_status)
 
         plc_layout.addWidget(self.date_label)
         plc_layout.addWidget(self.date_field)
+
         plc_layout.addWidget(self.plc_tcp_status)
         plc_layout.addWidget(self.plc_tcp_status_text)
-        plc_layout.addWidget(self.chk_conn_button)
+
+        plc_layout.addWidget(self.plc_state_label)
+        plc_layout.addWidget(self.plc_state_text)
+
+        plc_layout.addWidget(self.row_label)
+        plc_layout.addWidget(self.row_text)
+
+        plc_layout.addWidget(self.tcp_label)
+        plc_layout.addWidget(self.tcp_text)
+
+        # plc_layout.addWidget(self.chk_conn_button)
         
         plc_layout.setSpacing(5)
         plc_layout.setAlignment(self.plc_tcp_status_text, Qt.AlignLeft)
@@ -411,9 +459,9 @@ class TableApp(QWidget):
         input_layout.addWidget(self.label)
         input_layout.addWidget(self.name_field)
 
-        self.infeed_button = QPushButton('Send to PLC', self)
-        self.infeed_button.clicked.connect(self.send_to_plc)
-        input_layout.addWidget(self.infeed_button)
+        # self.infeed_button = QPushButton('Send to PLC', self)
+        # self.infeed_button.clicked.connect(self.send_to_plc)
+        # input_layout.addWidget(self.infeed_button)
 
         self.success_color = QColor(200, 255, 200)
         self.fail_color = QColor(255, 200, 200)
@@ -422,6 +470,9 @@ class TableApp(QWidget):
         self.table = QTableWidget(self)
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels(['Order', 'Model', 'Packing Code', 'Quantity Required','Good Quantity', 'Defective Quantity', 'Completed', 'Status'])
+        self.table.itemChanged.connect(self.calculate_quantities)
+        self.table.model().rowsInserted.connect(self.calculate_quantities)
+
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
 
@@ -458,10 +509,39 @@ class TableApp(QWidget):
         foot_layout.addWidget(self.clear_button)
 
         layout.addLayout(foot_layout)
-
-
         self.setLayout(layout)
-        #self.check_tcp_status()
+        # self.check_tcp_status()
+
+    def check_pulse(self, status):
+        if status:
+            self.tcp_text.setText('Alive')
+            self.tcp_text.setStyleSheet("background-color: green;color:white")
+        else:
+            self.tcp_text.setText('Down')
+            self.tcp_text.setStyleSheet("background-color: red;color:white")
+
+    def report_plc_state(self, report):
+        self.plc_state_text.setText(report)
+        self.plc_state_text.setStyleSheet("background-color: green;color:white")
+
+    def calculate_quantities(self):
+        rows = self.table.rowCount()
+        if rows > 0:
+            good = 0
+            defect = 0
+            complete = 0
+
+            for i in range(rows):
+                if self.table.item(i, 4) and self.table.item(i, 4).text():
+                    good += int(self.table.item(i, 4).text())
+                if  self.table.item(i, 5) and self.table.item(i, 5).text():
+                    defect += int(self.table.item(i, 5).text())
+                if  self.table.item(i, 6) and self.table.item(i,6).text():
+                    complete += int(self.table.item(i,6).text())
+
+            self.good_field.setText(str(good))
+            self.defect_field.setText(str(defect))
+            self.completed_field.setText(str(complete))
 
 
     def process_lot_num(self):
@@ -490,20 +570,24 @@ class TableApp(QWidget):
         widget.setText(text)
         widget.setStyleSheet("background-color: lightgrey;color:white")
 
-
-    def check_tcp_status(self):
-
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.connect((self.tcp_ip, self.tcp_port))
-                logger.info(s.getpeername())
-                self.plc_tcp_status_text.setText('CONNECTED')
-                self.plc_tcp_status_text.setStyleSheet("background-color: green;color:white")
-
-        except ConnectionRefusedError:
+    def check_tcp_status(self, status):
+        if status:
+            self.plc_tcp_status_text.setText('CONNECTED')
+            self.plc_tcp_status_text.setStyleSheet("background-color: green;color:white")
+        else:
             self.plc_tcp_status_text.setText('FAILED')
             self.plc_tcp_status_text.setStyleSheet("background-color: red;color:white")
-            logger.error("TCP connection refused", exc_info=True)
+        # try:
+        #     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        #         s.connect((self.tcp_ip, self.tcp_port))
+        #         logger.info(s.getpeername())
+        #         self.plc_tcp_status_text.setText('CONNECTED')
+        #         self.plc_tcp_status_text.setStyleSheet("background-color: green;color:white")
+
+        # except ConnectionRefusedError:
+        #     self.plc_tcp_status_text.setText('FAILED')
+        #     self.plc_tcp_status_text.setStyleSheet("background-color: red;color:white")
+        #     logger.error("TCP connection refused", exc_info=True)
 
 
     def toggle_tcp_conn(self, status):
@@ -551,7 +635,6 @@ class TableApp(QWidget):
             self.threadpool.start(worker)
             self.set_col_text(row, 6, 'RUNNING')
             self.color_row(row, QColor(	235, 169, 158))
-            
         except:
             logging.error("Worker failed", exc_info=True)
 
@@ -560,76 +643,40 @@ class TableApp(QWidget):
         '''
         Change text in col cell
         '''
-
         self.table.setItem(row, col, QTableWidgetItem(text))
 
 
-    def set_in_status(self):
-
-        if self.infeed:
-            self.infeed = False
-            self.reset_style(self.infeed_field, 'Idle')
-        else:
-
-            num_data = self.table.rowCount()
-
-            if num_data > 0:
-                count = 0
-                for row in range(self.table.rowCount()):
-                    if self.table.item(row, 3).text() == 'OK':
-                        count += 1
-
-                if count == num_data and not self.outfeed:
-
-                    self.infeed = True
-                    self.infeed_field.setText(f"Scanned {count} QR")
-                    self.infeed_field.setStyleSheet("background-color: green;color:white")
-
     def get_plc_status(self, result):
-
-        # Receives data from TCPCLient thread
-
-        msg_list, row, col = result
-        if msg_list[0] == 'M101':
-            logger.info(f"Reply from plc:{msg_list[1]} {msg_list[2]}")
-            self.worker.reassign(row, 4)
-        elif msg_list[0] == 'M102':
-            self.set_col_text(row, col, msg_list[1])
-            self.worker.reassign(row, 5)
-        elif msg_list[0] == 'M103':
-            self.set_col_text(row, col, msg_list[1])
-            self.worker.reassign(row, 6)
-        elif msg_list[0] == 'M104':
-            self.set_col_text(row, col, msg_list[1])
-            self.set_col_text(row, 7, "COMPLETED")
-            self.color_row(row, QColor(	144, 238, 144))
-            row += 1  # go to next row
-            self.worker.reassign(row, 3)  # change row and col for thread
-
-
-
-    def get_plc_status2(self, result):
         # Receives data TCPServer worker
-
-
         msg, row = result
         msg_list = msg.split('|')
+        temp = row + 1
+        self.row_text.setText(str(temp))
 
         if msg_list[0] == 'M101':
             logger.info(f"Reply from plc:{msg_list}")
-            self.set_col_text(0, 7, 'RUNNING')
-            self.color_row(0, QColor(235, 169, 158))
+            self.server.signal.report.emit('Reply to PLC with kanban data')
+            self.set_col_text(row, 7, 'RUNNING')
+            self.color_row(row, QColor(235, 169, 158))
             self.server.reassign(row, 4)
         elif msg_list[0] == 'M102':
+            self.server.signal.report.emit('Received good qty')
             self.set_col_text(row, 4, msg_list[1])
             self.server.reassign(row, 5)
         elif msg_list[0] == 'M103':
+            self.server.signal.report.emit('Received defective qty')
             self.set_col_text(row, 5, msg_list[1])
             self.server.reassign(row, 6)
         elif msg_list[0] == 'M104':
+            self.server.signal.report.emit('Received completed qty')
             self.set_col_text(row, 6, msg_list[1])
+        elif msg_list[0] == 'M105':
+            self.server.signal.report.emit('PLC outfeed scan complete')
             self.set_col_text(row, 7, "COMPLETED")
             self.color_row(row, QColor(	144, 238, 144))
+            self.server.plc_ready = False  # plc needs to send ready msg again
+            self.server.outfeed = False
+            self.server.outfeed_data = []  # reset outfeed kanban
             row += 1  # go to next row
             self.server.reassign(row, 3)  # change row and col for thread
 
@@ -661,9 +708,14 @@ class TableApp(QWidget):
         by sending qty again to PLC
         '''
         try:
-            row_indx, qty = self.get_row_by_column_value(0, data[0])
+            #row_indx, qty = self.get_row_by_column_value(0, data[0])
+            print(f"Outfeed scan {data}")
+            self.server.outfeed = True
+            if len(self.server.outfeed_data) > 0:
+                self.server.outfeed_data = []
 
-            self.send_tcp(row_indx, qty)
+            self.server.outfeed_data.extend([data[0], data[2], data[3]])
+            #self.send_tcp(row_indx, qty)
         except TypeError as e:
             logging.ERROR("Row is not present")
 
@@ -676,10 +728,10 @@ class TableApp(QWidget):
              # data = [model no, package code, order no, qty, COM ]
             model, packing_code, order, quantity, COM = data
 
-            if COM==self.scanner_outfeed and self.infeed:
+            if COM==self.scanner_outfeed:
                 self.check_outfeed(data)
 
-            elif COM==self.scanner_infeed and not self.infeed:
+            elif COM==self.scanner_infeed:
                 exists = self.check_row_exists(0, order)
                 if not exists:
                     row_position = self.table.rowCount()
@@ -709,10 +761,11 @@ class TableApp(QWidget):
     def save_table(self):
         _date = dt.today().strftime('%Y_%m_%d')
         dest_folders = os.path.join(os.getcwd(), _date)
-        if self.table.rowCount() > 0:
+        rows = self.table.rowCount()
+        if rows > 0:
             data = []
             data_header = ['Model', 'Packing code', 'Quantity']
-            for row in range(self.table.rowCount()):
+            for row in range(rows):
                 data.append([self.table.item(row, 0).text(), self.table.item(row, 1).text(), self.table.item(row, 2).text()])
 
             scanner.create_dir(dest_folders)
@@ -725,7 +778,11 @@ class TableApp(QWidget):
     def clear_table(self):
         self.table.setRowCount(0)
         self.name_field.clear()
+        self.good_field.clear()
+        self.defect_field.clear()
+        self.completed_field.clear()
         self.server.reassign(0, 3)
+        self.row_text.clear()
 
 
 # Parent window
@@ -741,7 +798,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.table.close()  # Ensure the child window is closed
-
         event.accept()
         super().closeEvent(event)  # Call the base class implementation
 
