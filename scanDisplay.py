@@ -13,7 +13,7 @@ from queue import Queue
 
 
 from PySide6.QtWidgets import (QMainWindow, QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-                               QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QDateEdit)
+                               QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QDateEdit, QSpinBox)
 from PySide6.QtCore import  QObject, Signal, Slot, QByteArray, QRunnable, QThreadPool, QTimer, Qt
 from PySide6.QtGui import QPixmap, QColor, QBrush
 
@@ -120,35 +120,44 @@ class TCPServerWorker(QRunnable):
         resp = ''
         cmd_id = msg.split('|')[0]
         num_rows = self.table.rowCount()
-        if cmd_id == 'M100':
-            self.signal.report.emit('PLC is ready to send')
-            self.plc_ready = True
-        elif cmd_id == 'M105' and self.plc_ready:
-            # outfeed check
-            print(cmd_id)
-            if self.outfeed:
-                print(self.outfeed_data)
-                order, model, qty = self.outfeed_data
-                ret_msg = '|'.join(['R105', order, model, qty ])
-                self.signal.data.emit((msg, self.row))
-                return ret_msg.encode('ASCII')
-        elif self.col < 7 and self.row < num_rows and self.plc_ready:
-            model = self.table.item(self.row, 1).text()
-            req_qty = self.table.item(self.row, self.col).text()
-            status = self.table.item(self.row, 7).text()  # status column helps keep track
-            if status != 'COMPLETED':
-                if cmd_id == 'M101' and status == "NEXT":
-                    # send qty, model and order to PLC
-                    self.signal.data.emit((msg, self.row))
-                    return self.create_req_qty_msg(model, req_qty)                    
+        if num_rows > 0:
+            if cmd_id == 'M100':
+                if msg.split('|')[1] == '200':
+                    self.signal.report.emit('PLC is ready to send')
+                    self.plc_ready = True
                 else:
+                    self.signal.report.emit('PLC is not ready')
+                    
+            if cmd_id == 'M104' and self.plc_ready:
+                # outfeed check
+                if self.outfeed and len(self.outfeed_data) > 0:
+                    print(self.outfeed_data)
+                    model, order, qty = self.outfeed_data
+                    ret_msg = '|'.join(['R104', model, qty ])
                     self.signal.data.emit((msg, self.row))
+                    return ret_msg.encode('ASCII')
+                else:
+                    self.outfeed = True
+                    self.signal.report.emit('OUTFEED')
+            elif cmd_id == 'M106':
+                self.signal.data.emit((msg, self.row))
+            elif self.col < 7 and self.row < num_rows and self.plc_ready:
+                model = self.table.item(self.row, 1).text()
+                req_qty = self.table.item(self.row, self.col).text()
+                status = self.table.item(self.row, 7).text()  # status column helps keep track
+                if status != 'COMPLETED':
+                    if cmd_id == 'M100' and status == "NEXT":
+                        # send qty and model to PLC
+                        self.signal.data.emit((msg, self.row))
+                        return self.create_req_qty_msg(model, req_qty)                    
+                    else:
+                        self.signal.data.emit((msg, self.row))
 
-    def create_req_qty_msg(self, order_no : str, req_qty : str):
-        data = '|'.join(['R101', order_no, req_qty])
-        
+    def create_req_qty_msg(self, model : str, req_qty : str):
+        data = '|'.join(['R100', model, req_qty])
         return data.encode('ASCII')
-    
+
+
     def reassign(self, row, col):
         self.row = row
         self.col = col
@@ -413,7 +422,7 @@ class TableApp(QWidget):
         self.plc_state_text = QLineEdit()
         self.plc_state_text.setReadOnly(True)
 
-        self.row_label = QLabel("Row")
+        self.row_label = QLabel("Active Row")
 
         self.row_text = QLineEdit()
         self.row_text.setReadOnly(True)
@@ -480,21 +489,34 @@ class TableApp(QWidget):
         self.clear_button = QPushButton('Clear', self)
         self.clear_button.clicked.connect(self.clear_table)
 
-        self.save_table_btn = QPushButton('Save', self)
-        self.save_table_btn.clicked.connect(self.save_table)
+        self.reset_button = QPushButton('Reset all status', self)
+        self.reset_button.clicked.connect(self.reset_status)
+
+        self.reset_one_button = QPushButton('Reset one status', self)
+        self.reset_one_button.clicked.connect(self.reset_status_one)
+
+        # self.save_table_btn = QPushButton('Save', self)
+        # self.save_table_btn.clicked.connect(self.save_table)
 
         self.good_label = QLabel("Good Qty")
         self.good_field = QLineEdit()
+        self.good_field.setReadOnly(True)
 
         self.defect_label = QLabel("Defective Qty")
         self.defect_field = QLineEdit()
+        self.defect_field.setReadOnly(True)
 
         self.completed_label = QLabel("Completed Qty")
         self.completed_field = QLineEdit()
+        self.completed_field.setReadOnly(True)
 
         layout.addLayout(plc_layout)
         layout.addLayout(input_layout)
         layout.addWidget(self.table)
+
+        self.reset_row_label = QLabel("Reset Row")
+        self.spin_box = QSpinBox()
+        self.spin_box.setRange(1, 100)
 
         foot_layout = QHBoxLayout()
         foot_layout.addWidget(self.good_label)
@@ -505,12 +527,15 @@ class TableApp(QWidget):
 
         foot_layout.addWidget(self.completed_label)
         foot_layout.addWidget(self.completed_field)
-        foot_layout.addWidget(self.save_table_btn)
+        foot_layout.addWidget(self.reset_row_label)
+        foot_layout.addWidget(self.spin_box)
+        foot_layout.addWidget(self.reset_one_button)
+        foot_layout.addWidget(self.reset_button)
+        # foot_layout.addWidget(self.save_table_btn)
         foot_layout.addWidget(self.clear_button)
 
         layout.addLayout(foot_layout)
         self.setLayout(layout)
-        # self.check_tcp_status()
 
     def check_pulse(self, status):
         if status:
@@ -613,7 +638,6 @@ class TableApp(QWidget):
         '''
         Send qty to PLC via TCP
         '''
-
         if not self.infeed:  # if outfeed is false it means
             for row in range(self.table.rowCount()):
                 if self.table.item(row, 6).text()  == 'COMPLETED':
@@ -653,32 +677,61 @@ class TableApp(QWidget):
         temp = row + 1
         self.row_text.setText(str(temp))
 
-        if msg_list[0] == 'M101':
-            logger.info(f"Reply from plc:{msg_list}")
-            self.server.signal.report.emit('Reply to PLC with kanban data')
-            self.set_col_text(row, 7, 'RUNNING')
-            self.color_row(row, QColor(235, 169, 158))
-            self.server.reassign(row, 4)
-        elif msg_list[0] == 'M102':
+        if msg_list[0] == 'M100':
+            if msg_list[1] == '200':
+                logger.info(f"Reply from plc:{msg_list}")
+                self.server.signal.report.emit('Reply to PLC with kanban data')
+                self.set_col_text(row, 7, 'RUNNING')
+                self.color_row(row, QColor(235, 169, 158))
+                self.server.reassign(row, 4)
+            else:
+                self.server.signal.report.emit('PLC reply error')
+                self.set_col_text(row, 7, 'Fail')
+
+        elif msg_list[0] == 'M101':
             self.server.signal.report.emit('Received good qty')
-            self.set_col_text(row, 4, msg_list[1])
+            self.set_col_text(row, 4, msg_list[2])
             self.server.reassign(row, 5)
-        elif msg_list[0] == 'M103':
+        elif msg_list[0] == 'M102':
             self.server.signal.report.emit('Received defective qty')
-            self.set_col_text(row, 5, msg_list[1])
+            self.set_col_text(row, 5, msg_list[2])
             self.server.reassign(row, 6)
-        elif msg_list[0] == 'M104':
+        elif msg_list[0] == 'M103':
             self.server.signal.report.emit('Received completed qty')
-            self.set_col_text(row, 6, msg_list[1])
+            self.set_col_text(row, 6, msg_list[2])
+        elif msg_list[0] == 'M104':
+            self.server.signal.report.emit('PLC outfeed scan sent')
         elif msg_list[0] == 'M105':
-            self.server.signal.report.emit('PLC outfeed scan complete')
-            self.set_col_text(row, 7, "COMPLETED")
-            self.color_row(row, QColor(	144, 238, 144))
-            self.server.plc_ready = False  # plc needs to send ready msg again
-            self.server.outfeed = False
-            self.server.outfeed_data = []  # reset outfeed kanban
-            row += 1  # go to next row
-            self.server.reassign(row, 3)  # change row and col for thread
+            if msg_list[1] == '200':
+                self.server.signal.report.emit('PLC kanban match success')
+                self.set_col_text(row, 7, "COMPLETED")
+                self.color_row(row, QColor(	144, 238, 144))
+                self.write_to_file(row)
+                self.server.plc_ready = False  # plc needs to send ready msg again
+                self.server.outfeed = False
+                self.server.outfeed_data = []  # reset outfeed kanban
+                row += 1  # go to next row
+                self.server.reassign(row, 3)  # change row and col for thread
+            else:
+                self.server.signal.report.emit('PLC kanban mismatch')
+                self.set_col_text(row, 7, "FAILED")
+                self.color_row(row, self.fail_color)
+
+
+    def write_to_file(self, row):
+        data_header = ['Lot Number', 'Model', 'Packaging code', 'Quantity']
+        data = []
+        data_row = []
+        data_row.append(self.name_field.text())
+        data_row.append(self.table.item(row, 1).text())
+        data_row.append(self.table.item(row, 2).text())
+        data_row.append(self.table.item(row, 3).text())
+        data.append(data_row)
+        print(data)
+        _date = dt.today().strftime('%Y_%m_%d')
+        dest_folders = os.path.join(os.getcwd(), _date)
+        scanner.create_dir(dest_folders)
+        scanner.create_excel(data, data_header, dest_folders, 'MRE_QR_kanban_info.xlsx')
 
 
     def get_row_by_column_value(self, column, model) -> int:
@@ -708,14 +761,14 @@ class TableApp(QWidget):
         by sending qty again to PLC
         '''
         try:
-            #row_indx, qty = self.get_row_by_column_value(0, data[0])
+   
             print(f"Outfeed scan {data}")
-            self.server.outfeed = True
-            if len(self.server.outfeed_data) > 0:
-                self.server.outfeed_data = []
+            if self.server.outfeed:
+                if len(self.server.outfeed_data) > 0:
+                    self.server.outfeed_data = []
 
-            self.server.outfeed_data.extend([data[0], data[2], data[3]])
-            #self.send_tcp(row_indx, qty)
+                self.server.outfeed_data.extend([data[0], data[2], data[3]])
+
         except TypeError as e:
             logging.ERROR("Row is not present")
 
@@ -784,6 +837,20 @@ class TableApp(QWidget):
         self.server.reassign(0, 3)
         self.row_text.clear()
 
+    def reset_status(self):
+        for row in range(self.table.rowCount()):
+            self.table.setItem(row, 7, QTableWidgetItem('NEXT'))
+            self.color_row(row, QColor(255, 200, 100))
+
+        self.server.reassign(0, 3)
+    
+    def reset_status_one(self):
+        row = self.spin_box.value() - 1    
+        if row < self.table.rowCount():  
+            self.table.setItem(row, 7, QTableWidgetItem('NEXT'))
+            self.color_row(row, QColor(255, 200, 100))
+            self.server.reassign(row, 3)
+            self.row_text.clear()
 
 # Parent window
 class MainWindow(QMainWindow):

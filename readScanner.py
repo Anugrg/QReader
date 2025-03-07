@@ -192,7 +192,7 @@ def save_to_file(prefix, input_val, name, _pipe):
     logger.info("Sending data to table")
     _pipe.send(data_row)
 
-    #print(tabulate(data, headers=data_header, tablefmt="grid", showindex="always"))
+    # print(tabulate(data, headers=data_header, tablefmt="grid", showindex="always"))
 
     '''_date = dt.today().strftime('%Y_%m_%d')
     dest_folders = os.path.join(os.getcwd(), _date)
